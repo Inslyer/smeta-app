@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from core import db
 from core.parser_client import parse_client_estimate
 from core.parser_contractor import parse_contractor_estimate
+from core.exporter import build_workbook, filename_for
 from core.matcher import match_estimates
 from core.models import Estimate, Match
 
@@ -256,5 +257,23 @@ with tab_summary:
                 f"🟢 уверенных: **{green}**  ·  🟡 с оговорками: **{yellow}**  ·  "
                 f"🟠 спорных: **{orange}**  ·  ⚪️ без пары: **{none}**"
             )
+
+            st.divider()
+            st.subheader("📥 Скачать сводную смету")
+            st.caption(
+                "Excel-файл с 4 листами: «Сводная смета» (с маржой и светофором), "
+                "«Аналитика», и исходники обеих смет для аудита."
+            )
+            try:
+                xlsx_bytes = build_workbook(client, contractor, matches)
+                st.download_button(
+                    label="💾 Скачать Excel со сводной сметой",
+                    data=xlsx_bytes,
+                    file_name=filename_for(client),
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary",
+                )
+            except Exception as e:
+                st.error(f"Не удалось собрать Excel: {e}")
         else:
             st.info("Нажмите «Сопоставить позиции», чтобы Claude построил пары.")
