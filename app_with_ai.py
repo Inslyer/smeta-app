@@ -78,7 +78,7 @@ def _items_to_df(estimate: Estimate) -> pd.DataFrame:
 with st.sidebar:
     st.header("⚙️ Настройки")
     st.caption(f"Модель: `{os.getenv('CLAUDE_MODEL', 'claude-sonnet-4-6')}`")
-    st.caption(f"База цен: `{db.DEFAULT_DB_PATH.name}`")
+    st.caption(f"База цен: `{db.db_label()}`")
 
     st.divider()
     st.subheader("Поставщики и подрядчики")
