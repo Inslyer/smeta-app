@@ -1,13 +1,14 @@
 """Генератор итогового Excel со сводной сметой и аналитикой.
 
 Структура книги:
-    1. «Сводная смета» — каждая позиция клиента разворачивается на ДВЕ строки
-        (материал и работа отдельно), цены формулами, итоги SUM, светофор маржи.
-    2. «Аналитика» — две таблицы: маржа по работам и по материалам по категориям.
-    3. «Исходник клиента» / «Исходник подрядчика» — оригинальные сметы с итогами.
+    1. «Сводная смета» — два блока:
+        блок РАБОТЫ (по разделам клиента) и блок МАТЕРИАЛЫ (по разделам).
+        Все суммы и маржа — формулами Excel. Столбцы с НДС скрыты.
+    2. «Аналитика» — все цифры формулами со ссылками на лист «Сводная смета».
+    3. «Исходник клиента» / «Исходник подрядчика» — оригинальные сметы
+        с итогами по разделам и общим итогом, тоже формулами.
 
 НДС РФ 2026 = 22%. Маржа считается без НДС.
-Категории материалов: Лотки, Кабель, Зарядные станции, Шкафы, Другое.
 """
 from __future__ import annotations
 
@@ -24,19 +25,17 @@ from openpyxl.worksheet.worksheet import Worksheet
 from .models import Estimate, EstimateItem, Match
 
 
-VAT_RATE = 0.22  # НДС РФ с 2026
-VAT_DIVISOR = f"{1 + VAT_RATE:.2f}"  # для формул
+VAT_RATE = 0.22
+VAT_DIVISOR = f"{1 + VAT_RATE:.2f}"
 
-# Палитра светофора по марже %.
 GREEN = PatternFill("solid", fgColor="C6EFCE")
 YELLOW = PatternFill("solid", fgColor="FFEB9C")
 RED = PatternFill("solid", fgColor="FFC7CE")
 GREY = PatternFill("solid", fgColor="EEECEC")
 SECTION_FILL = PatternFill("solid", fgColor="DDEBF7")
+BLOCK_FILL = PatternFill("solid", fgColor="4472C4")
 TOTAL_FILL = PatternFill("solid", fgColor="B4C7E7")
 PROJECT_TOTAL_FILL = PatternFill("solid", fgColor="2E75B6")
-MATERIAL_TINT = PatternFill("solid", fgColor="FFF7E6")  # лёгкий фон для строк материала
-WORK_TINT = PatternFill("solid", fgColor="EAF7EA")      # лёгкий фон для строк работы
 
 BORDER_THIN = Border(
     left=Side(style="thin", color="C0C0C0"),
@@ -46,7 +45,7 @@ BORDER_THIN = Border(
 )
 HEADER_FONT = Font(bold=True, color="FFFFFF")
 HEADER_FILL = PatternFill("solid", fgColor="305496")
-PROJECT_FONT = Font(bold=True, color="FFFFFF")
+WHITE_BOLD = Font(bold=True, color="FFFFFF")
 
 
 # ---------------------------------------------------------- Классификация материалов
@@ -79,65 +78,52 @@ def _margin_fill(margin_pct: Optional[float]) -> PatternFill:
     return RED
 
 
-# ---------------------------------------------------------- Сводная смета
-# Колонки листа 1
+# ---------------------------------------------------------- Колонки листа «Сводная смета»
+# Порядок: №, Наименование клиента, Ед., Кол-во,
+#          Цена/ед. с НДС (скрыт), Цена/ед. без НДС,
+#          Сумма с НДС (скрыт), Сумма без НДС,
+#          Цена закупки (без НДС), Сумма закупки (без НДС),
+#          Наименование у подрядчика, Исполнитель / Поставщик,
+#          Маржа руб, Маржа %
 COLUMNS = [
-    ("Раздел", 28),
-    ("№", 5),
-    ("Тип строки", 11),
-    ("Наименование", 55),
+    ("№", 6),
+    ("Наименование (верхняя смета)", 50),
     ("Ед.", 8),
     ("Кол-во", 10),
-    ("Цена клиента (с НДС)", 16),
-    ("Сумма клиента (с НДС)", 18),
-    ("Сумма клиента (без НДС)", 18),
-    ("Исполнитель / Поставщик", 24),
-    ("Цена закупки (без НДС)", 18),
+    ("Цена/ед. (с НДС)", 14),
+    ("Цена/ед. (без НДС)", 14),
+    ("Сумма (с НДС)", 16),
+    ("Сумма (без НДС)", 16),
+    ("Цена закупки (без НДС)", 16),
     ("Сумма закупки (без НДС)", 18),
+    ("Наименование (нижняя смета)", 50),
+    ("Исполнитель / Поставщик", 24),
     ("Маржа, руб.", 14),
     ("Маржа, %", 11),
-    ("Уверенность AI", 14),
-    ("Комментарий AI", 50),
 ]
-COL = {title: idx + 1 for idx, (title, _) in enumerate(COLUMNS)}
+N = len(COLUMNS)
 
-C_QTY = COL["Кол-во"]                              # F
-C_UNIT_PRICE_CLIENT = COL["Цена клиента (с НДС)"]  # G
-C_SUM_CLIENT_GROSS = COL["Сумма клиента (с НДС)"]  # H
-C_SUM_CLIENT_NET = COL["Сумма клиента (без НДС)"]  # I
-C_UNIT_PRICE_CONTR = COL["Цена закупки (без НДС)"]  # K
-C_SUM_CONTR_NET = COL["Сумма закупки (без НДС)"]   # L
-C_MARGIN_ABS = COL["Маржа, руб."]                  # M
-C_MARGIN_PCT = COL["Маржа, %"]                     # N
+# Удобные индексы
+NUMBER = 1
+NAME_CLIENT = 2
+UNIT = 3
+QTY = 4
+UNIT_PRICE_GROSS = 5      # скрыт
+UNIT_PRICE_NET = 6
+SUM_GROSS = 7              # скрыт
+SUM_NET = 8
+UNIT_PRICE_PURCHASE = 9
+SUM_PURCHASE = 10
+NAME_BOTTOM = 11
+EXECUTOR = 12
+MARGIN_ABS = 13
+MARGIN_PCT = 14
 
-
-def _col_letter(col_idx: int) -> str:
-    return get_column_letter(col_idx)
-
-
-def _write_headers(ws: Worksheet, columns=COLUMNS):
-    for col_idx, (title, width) in enumerate(columns, start=1):
-        cell = ws.cell(row=1, column=col_idx, value=title)
-        cell.font = HEADER_FONT
-        cell.fill = HEADER_FILL
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-        cell.border = BORDER_THIN
-        ws.column_dimensions[get_column_letter(col_idx)].width = width
-    ws.row_dimensions[1].height = 38
-    ws.freeze_panes = "D2"
+HIDDEN_COLUMNS = (UNIT_PRICE_GROSS, SUM_GROSS)
 
 
-def _apply_border(ws, row_idx: int, ncols: int):
-    for c in range(1, ncols + 1):
-        ws.cell(row=row_idx, column=c).border = BORDER_THIN
-
-
-def _section_row(ws, row_idx: int, section: str, ncols: int):
-    for c in range(1, ncols + 1):
-        ws.cell(row=row_idx, column=c).fill = SECTION_FILL
-        ws.cell(row=row_idx, column=c).border = BORDER_THIN
-    ws.cell(row=row_idx, column=1, value=section).font = Font(bold=True)
-    ws.merge_cells(start_row=row_idx, start_column=1, end_row=row_idx, end_column=ncols)
+def _L(col: int) -> str:
+    return get_column_letter(col)
 
 
 def _money_format(cell):
@@ -148,299 +134,411 @@ def _pct_format(cell):
     cell.number_format = "0.0%"
 
 
+def _border_row(ws, row: int, ncols: int):
+    for c in range(1, ncols + 1):
+        ws.cell(row=row, column=c).border = BORDER_THIN
+
+
+def _write_headers(ws: Worksheet):
+    for col_idx, (title, width) in enumerate(COLUMNS, start=1):
+        cell = ws.cell(row=1, column=col_idx, value=title)
+        cell.font = HEADER_FONT
+        cell.fill = HEADER_FILL
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = BORDER_THIN
+        ws.column_dimensions[_L(col_idx)].width = width
+    for c in HIDDEN_COLUMNS:
+        ws.column_dimensions[_L(c)].hidden = True
+    ws.row_dimensions[1].height = 40
+    ws.freeze_panes = f"{_L(NAME_CLIENT + 1)}2"
+
+
+def _block_header_row(ws, row: int, title: str):
+    for c in range(1, N + 1):
+        ws.cell(row=row, column=c).fill = BLOCK_FILL
+        ws.cell(row=row, column=c).font = WHITE_BOLD
+        ws.cell(row=row, column=c).border = BORDER_THIN
+    ws.cell(row=row, column=1, value=title).alignment = Alignment(horizontal="left",
+                                                                     vertical="center")
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=N)
+    ws.row_dimensions[row].height = 22
+
+
+def _section_header_row(ws, row: int, section: str):
+    for c in range(1, N + 1):
+        ws.cell(row=row, column=c).fill = SECTION_FILL
+        ws.cell(row=row, column=c).border = BORDER_THIN
+    ws.cell(row=row, column=1, value=section).font = Font(bold=True)
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=N)
+
+
+def _write_item_row(
+    ws,
+    row: int,
+    item: EstimateItem,
+    kind: str,                            # "work" или "material"
+    contractor_item: Optional[EstimateItem],
+    contractor_title: str,
+):
+    """Записывает строку. kind определяет какую цену клиента взять (мат/раб)."""
+    qty = item.quantity or 0
+    unit_price_gross = (item.price_work if kind == "work" else item.price_material)
+
+    ws.cell(row=row, column=NUMBER, value=item.number)
+    ws.cell(row=row, column=NAME_CLIENT, value=item.name).alignment = Alignment(
+        wrap_text=True, vertical="top"
+    )
+    ws.cell(row=row, column=UNIT, value=item.unit)
+    ws.cell(row=row, column=QTY, value=qty).number_format = "#,##0.00"
+
+    # Цена с НДС (скрытая колонка) — значение
+    if unit_price_gross is not None:
+        ws.cell(row=row, column=UNIT_PRICE_GROSS, value=unit_price_gross)
+        _money_format(ws.cell(row=row, column=UNIT_PRICE_GROSS))
+
+        # Цена без НДС — формула
+        ws.cell(row=row, column=UNIT_PRICE_NET,
+                value=f"={_L(UNIT_PRICE_GROSS)}{row}/{VAT_DIVISOR}")
+        _money_format(ws.cell(row=row, column=UNIT_PRICE_NET))
+
+        # Сумма с НДС (скрытая) — qty * unit_gross
+        ws.cell(row=row, column=SUM_GROSS,
+                value=f"={_L(QTY)}{row}*{_L(UNIT_PRICE_GROSS)}{row}")
+        _money_format(ws.cell(row=row, column=SUM_GROSS))
+
+        # Сумма без НДС — формула qty * unit_net
+        ws.cell(row=row, column=SUM_NET,
+                value=f"={_L(QTY)}{row}*{_L(UNIT_PRICE_NET)}{row}")
+        _money_format(ws.cell(row=row, column=SUM_NET))
+
+    # Закупка — только для work и если есть подрядчик
+    has_purchase = (kind == "work" and contractor_item is not None
+                    and contractor_item.price_work is not None)
+    if has_purchase:
+        ws.cell(row=row, column=UNIT_PRICE_PURCHASE,
+                value=contractor_item.price_work)
+        _money_format(ws.cell(row=row, column=UNIT_PRICE_PURCHASE))
+
+        ws.cell(row=row, column=SUM_PURCHASE,
+                value=f"={_L(QTY)}{row}*{_L(UNIT_PRICE_PURCHASE)}{row}")
+        _money_format(ws.cell(row=row, column=SUM_PURCHASE))
+
+        ws.cell(row=row, column=NAME_BOTTOM, value=contractor_item.name).alignment = \
+            Alignment(wrap_text=True, vertical="top")
+        ws.cell(row=row, column=EXECUTOR, value=contractor_title)
+
+        # Маржа
+        ws.cell(row=row, column=MARGIN_ABS,
+                value=f"={_L(SUM_NET)}{row}-{_L(SUM_PURCHASE)}{row}")
+        _money_format(ws.cell(row=row, column=MARGIN_ABS))
+
+        pct_cell = ws.cell(row=row, column=MARGIN_PCT,
+                            value=f"=IF({_L(SUM_NET)}{row}=0,0,"
+                                  f"{_L(MARGIN_ABS)}{row}/{_L(SUM_NET)}{row})")
+        _pct_format(pct_cell)
+
+        # Светофор маржи — статически по нашим значениям
+        if unit_price_gross and contractor_item.price_work and qty:
+            client_net = qty * unit_price_gross / (1 + VAT_RATE)
+            purchase_net = qty * contractor_item.price_work
+            mp = (client_net - purchase_net) / client_net if client_net else None
+            pct_cell.fill = _margin_fill(mp)
+    else:
+        # помечаем пустые колонки маржи
+        if kind == "material":
+            ws.cell(row=row, column=NAME_BOTTOM, value="— нет цены закупки —")
+            ws.cell(row=row, column=EXECUTOR, value="(материал)").fill = GREY
+        else:
+            ws.cell(row=row, column=NAME_BOTTOM, value="— не закрыто —")
+            ws.cell(row=row, column=EXECUTOR, value="—").fill = GREY
+        ws.cell(row=row, column=MARGIN_PCT).fill = GREY
+
+    _border_row(ws, row, N)
+
+
+def _section_subtotal_row(ws, row: int, label: str,
+                           item_rows: list[int]) -> dict:
+    """Итог по разделу — формулами SUM. Возвращает адреса для аналитики."""
+    if not item_rows:
+        return {}
+    first, last = item_rows[0], item_rows[-1]
+    for c in range(1, N + 1):
+        ws.cell(row=row, column=c).fill = TOTAL_FILL
+        ws.cell(row=row, column=c).font = Font(bold=True)
+        ws.cell(row=row, column=c).border = BORDER_THIN
+    ws.cell(row=row, column=1, value=label)
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=QTY)
+
+    ws.cell(row=row, column=SUM_GROSS,
+            value=f"=SUM({_L(SUM_GROSS)}{first}:{_L(SUM_GROSS)}{last})")
+    _money_format(ws.cell(row=row, column=SUM_GROSS))
+
+    ws.cell(row=row, column=SUM_NET,
+            value=f"=SUM({_L(SUM_NET)}{first}:{_L(SUM_NET)}{last})")
+    _money_format(ws.cell(row=row, column=SUM_NET))
+
+    ws.cell(row=row, column=SUM_PURCHASE,
+            value=f"=SUM({_L(SUM_PURCHASE)}{first}:{_L(SUM_PURCHASE)}{last})")
+    _money_format(ws.cell(row=row, column=SUM_PURCHASE))
+
+    ws.cell(row=row, column=MARGIN_ABS,
+            value=f"={_L(SUM_NET)}{row}-{_L(SUM_PURCHASE)}{row}")
+    _money_format(ws.cell(row=row, column=MARGIN_ABS))
+
+    ws.cell(row=row, column=MARGIN_PCT,
+            value=f"=IF({_L(SUM_NET)}{row}=0,0,"
+                  f"{_L(MARGIN_ABS)}{row}/{_L(SUM_NET)}{row})")
+    _pct_format(ws.cell(row=row, column=MARGIN_PCT))
+
+    return {
+        "row": row,
+        "sum_gross": f"{_L(SUM_GROSS)}{row}",
+        "sum_net": f"{_L(SUM_NET)}{row}",
+        "sum_purchase": f"{_L(SUM_PURCHASE)}{row}",
+    }
+
+
+def _block_total_row(ws, row: int, label: str,
+                      section_subtotals: list[dict], fill=PROJECT_TOTAL_FILL,
+                      font=WHITE_BOLD) -> dict:
+    """Итог по блоку (Работы / Материалы / Проект)."""
+    for c in range(1, N + 1):
+        ws.cell(row=row, column=c).fill = fill
+        ws.cell(row=row, column=c).font = font
+        ws.cell(row=row, column=c).border = BORDER_THIN
+    ws.cell(row=row, column=1, value=label)
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=QTY)
+
+    if not section_subtotals:
+        return {"row": row}
+
+    for col_key, target_col in [
+        ("sum_gross", SUM_GROSS),
+        ("sum_net", SUM_NET),
+        ("sum_purchase", SUM_PURCHASE),
+    ]:
+        formula = "+".join(s[col_key] for s in section_subtotals)
+        cell = ws.cell(row=row, column=target_col, value=f"={formula}")
+        _money_format(cell)
+
+    ws.cell(row=row, column=MARGIN_ABS,
+            value=f"={_L(SUM_NET)}{row}-{_L(SUM_PURCHASE)}{row}")
+    _money_format(ws.cell(row=row, column=MARGIN_ABS))
+
+    ws.cell(row=row, column=MARGIN_PCT,
+            value=f"=IF({_L(SUM_NET)}{row}=0,0,"
+                  f"{_L(MARGIN_ABS)}{row}/{_L(SUM_NET)}{row})")
+    _pct_format(ws.cell(row=row, column=MARGIN_PCT))
+
+    return {
+        "row": row,
+        "sum_gross": f"{_L(SUM_GROSS)}{row}",
+        "sum_net": f"{_L(SUM_NET)}{row}",
+        "sum_purchase": f"{_L(SUM_PURCHASE)}{row}",
+    }
+
+
 def _build_summary_sheet(ws: Worksheet, client: Estimate, contractor: Estimate,
                           matches: list[Match]):
     ws.title = "Сводная смета"
     _write_headers(ws)
-    ncols = len(COLUMNS)
 
     match_by_client = {m.client_idx: m for m in matches}
-    sections_in_order: list[str] = []
+
+    sections_order: list[str] = []
     seen = set()
     for it in client.items:
         if it.section not in seen:
-            sections_in_order.append(it.section)
+            sections_order.append(it.section)
             seen.add(it.section)
 
+    # Подготовка списков работ и материалов по разделам
+    work_items_by_section: dict[str, list[tuple[int, EstimateItem]]] = {}
+    material_items_by_section: dict[str, list[tuple[int, EstimateItem]]] = {}
+
+    for c_idx, it in enumerate(client.items):
+        has_work = it.price_work is not None or it.sum_work is not None
+        has_mat = it.price_material is not None or it.sum_material is not None
+        if has_work:
+            work_items_by_section.setdefault(it.section, []).append((c_idx, it))
+        if has_mat:
+            material_items_by_section.setdefault(it.section, []).append((c_idx, it))
+
+    state = {
+        "work_section_subtotals": {},   # section -> dict (row, sum_net, sum_purchase ...)
+        "material_section_subtotals": {},
+        "work_block_total": None,
+        "material_block_total": None,
+        "project_total": None,
+    }
+
     row = 2
-    section_total_rows: list[tuple[str, int, list[int]]] = []  # (раздел, row_total, item_rows)
 
-    for section in sections_in_order:
-        _section_row(ws, row, section, ncols)
+    # ============================== БЛОК РАБОТЫ
+    _block_header_row(ws, row, "🔧 РАБОТЫ")
+    row += 1
+
+    work_section_addrs: list[dict] = []
+    for section in sections_order:
+        items = work_items_by_section.get(section, [])
+        if not items:
+            continue
+        _section_header_row(ws, row, section)
         row += 1
-
-        section_item_rows: list[int] = []
-
-        for c_idx, item in enumerate(client.items):
-            if item.section != section:
-                continue
-
+        item_rows: list[int] = []
+        for c_idx, it in items:
             match = match_by_client.get(c_idx)
             contractor_item = (
                 contractor.items[match.contractor_idx]
                 if match and match.contractor_idx is not None else None
             )
-
-            qty = item.quantity or 0
-            # Решаем — какие строки выводить
-            has_material = item.price_material is not None or item.sum_material is not None
-            has_work = item.price_work is not None or item.sum_work is not None
-            kinds_to_emit: list[str] = []
-            if has_material:
-                kinds_to_emit.append("material")
-            if has_work:
-                kinds_to_emit.append("work")
-            if not kinds_to_emit:
-                kinds_to_emit.append(item.kind if item.kind != "composite" else "material")
-
-            for kind in kinds_to_emit:
-                row_letter_qty = f"{_col_letter(C_QTY)}{row}"
-                row_letter_unit_client = f"{_col_letter(C_UNIT_PRICE_CLIENT)}{row}"
-                row_letter_sum_client_gross = f"{_col_letter(C_SUM_CLIENT_GROSS)}{row}"
-                row_letter_sum_client_net = f"{_col_letter(C_SUM_CLIENT_NET)}{row}"
-                row_letter_unit_contr = f"{_col_letter(C_UNIT_PRICE_CONTR)}{row}"
-                row_letter_sum_contr = f"{_col_letter(C_SUM_CONTR_NET)}{row}"
-                row_letter_margin = f"{_col_letter(C_MARGIN_ABS)}{row}"
-
-                ws.cell(row=row, column=1, value=item.section)
-                ws.cell(row=row, column=2, value=item.number)
-                ws.cell(row=row, column=3,
-                        value="Материал" if kind == "material" else "Работа")
-                ws.cell(row=row, column=4, value=item.name).alignment = \
-                    Alignment(wrap_text=True, vertical="top")
-                ws.cell(row=row, column=5, value=item.unit)
-                ws.cell(row=row, column=6, value=qty).number_format = "#,##0.00"
-
-                unit_price = (item.price_material if kind == "material"
-                              else item.price_work)
-                ws.cell(row=row, column=C_UNIT_PRICE_CLIENT, value=unit_price)
-                _money_format(ws.cell(row=row, column=C_UNIT_PRICE_CLIENT))
-
-                # Сумма клиента с НДС — формула qty * unit
-                if unit_price is not None:
-                    ws.cell(
-                        row=row, column=C_SUM_CLIENT_GROSS,
-                        value=f"={row_letter_qty}*{row_letter_unit_client}",
-                    )
-                _money_format(ws.cell(row=row, column=C_SUM_CLIENT_GROSS))
-
-                # Сумма без НДС — формула с НДС / (1+ставка)
-                ws.cell(
-                    row=row, column=C_SUM_CLIENT_NET,
-                    value=f"={row_letter_sum_client_gross}/{VAT_DIVISOR}",
-                )
-                _money_format(ws.cell(row=row, column=C_SUM_CLIENT_NET))
-
-                # Закупка — только для работы и если есть матч
-                if kind == "work" and contractor_item:
-                    ws.cell(row=row, column=10,
-                            value=f"Подрядчик: {contractor.title}")
-                    ws.cell(row=row, column=C_UNIT_PRICE_CONTR,
-                            value=contractor_item.price_work)
-                    _money_format(ws.cell(row=row, column=C_UNIT_PRICE_CONTR))
-                    ws.cell(
-                        row=row, column=C_SUM_CONTR_NET,
-                        value=f"={row_letter_qty}*{row_letter_unit_contr}",
-                    )
-                    _money_format(ws.cell(row=row, column=C_SUM_CONTR_NET))
-
-                    ws.cell(
-                        row=row, column=C_MARGIN_ABS,
-                        value=f"={row_letter_sum_client_net}-{row_letter_sum_contr}",
-                    )
-                    _money_format(ws.cell(row=row, column=C_MARGIN_ABS))
-
-                    margin_pct_cell = ws.cell(
-                        row=row, column=C_MARGIN_PCT,
-                        value=(
-                            f"=IF({row_letter_sum_client_net}=0,0,"
-                            f"{row_letter_margin}/{row_letter_sum_client_net})"
-                        ),
-                    )
-                    _pct_format(margin_pct_cell)
-
-                    # Светофор — по формуле не покрасишь, посчитаю Python-стороной
-                    if item.sum_work and contractor_item.price_work:
-                        client_net = (item.sum_work or 0) / (1 + VAT_RATE)
-                        c_net = (contractor_item.price_work or 0) * qty
-                        margin_pct_value = ((client_net - c_net) / client_net
-                                            if client_net else None)
-                        margin_pct_cell.fill = _margin_fill(margin_pct_value)
-
-                    if match:
-                        conf_cell = ws.cell(row=row, column=15, value=match.confidence)
-                        _pct_format(conf_cell)
-                        ws.cell(row=row, column=16, value=match.reason).alignment = \
-                            Alignment(wrap_text=True, vertical="top")
-                else:
-                    # Материал или работа без матча
-                    ws.cell(
-                        row=row, column=10,
-                        value=("— нет поставщика —" if kind == "material" else "— не закрыто —"),
-                    ).fill = GREY
-                    ws.cell(row=row, column=C_MARGIN_PCT).fill = GREY
-
-                # лёгкая подсветка типа строки
-                ws.cell(row=row, column=3).fill = (
-                    MATERIAL_TINT if kind == "material" else WORK_TINT
-                )
-
-                _apply_border(ws, row, ncols)
-                section_item_rows.append(row)
-                row += 1
-
-        # Строка итога раздела
-        if section_item_rows:
-            first = section_item_rows[0]
-            last = section_item_rows[-1]
-            for c in range(1, ncols + 1):
-                ws.cell(row=row, column=c).fill = TOTAL_FILL
-                ws.cell(row=row, column=c).font = Font(bold=True)
-                ws.cell(row=row, column=c).border = BORDER_THIN
-            ws.cell(row=row, column=1, value=f"Итого по разделу: {section}")
-            ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=5)
-            ws.cell(row=row, column=C_SUM_CLIENT_GROSS,
-                    value=f"=SUM({_col_letter(C_SUM_CLIENT_GROSS)}{first}:"
-                          f"{_col_letter(C_SUM_CLIENT_GROSS)}{last})")
-            _money_format(ws.cell(row=row, column=C_SUM_CLIENT_GROSS))
-            ws.cell(row=row, column=C_SUM_CLIENT_NET,
-                    value=f"=SUM({_col_letter(C_SUM_CLIENT_NET)}{first}:"
-                          f"{_col_letter(C_SUM_CLIENT_NET)}{last})")
-            _money_format(ws.cell(row=row, column=C_SUM_CLIENT_NET))
-            ws.cell(row=row, column=C_SUM_CONTR_NET,
-                    value=f"=SUM({_col_letter(C_SUM_CONTR_NET)}{first}:"
-                          f"{_col_letter(C_SUM_CONTR_NET)}{last})")
-            _money_format(ws.cell(row=row, column=C_SUM_CONTR_NET))
-            ws.cell(row=row, column=C_MARGIN_ABS,
-                    value=f"={_col_letter(C_SUM_CLIENT_NET)}{row}"
-                          f"-{_col_letter(C_SUM_CONTR_NET)}{row}")
-            _money_format(ws.cell(row=row, column=C_MARGIN_ABS))
-            ws.cell(row=row, column=C_MARGIN_PCT,
-                    value=f"=IF({_col_letter(C_SUM_CLIENT_NET)}{row}=0,0,"
-                          f"{_col_letter(C_MARGIN_ABS)}{row}"
-                          f"/{_col_letter(C_SUM_CLIENT_NET)}{row})")
-            _pct_format(ws.cell(row=row, column=C_MARGIN_PCT))
-
-            section_total_rows.append((section, row, section_item_rows))
+            _write_item_row(ws, row, it, "work", contractor_item, contractor.title)
+            item_rows.append(row)
             row += 1
-        row += 1  # пустая строка между разделами
-
-    # Финальный итог проекта
-    if section_total_rows:
+        subtotal = _section_subtotal_row(
+            ws, row, f"Итого работ по разделу: {section}", item_rows,
+        )
+        if subtotal:
+            state["work_section_subtotals"][section] = subtotal
+            work_section_addrs.append(subtotal)
         row += 1
-        total_rows = [tr for _, tr, _ in section_total_rows]
-        for c in range(1, ncols + 1):
-            ws.cell(row=row, column=c).fill = PROJECT_TOTAL_FILL
-            ws.cell(row=row, column=c).font = PROJECT_FONT
-            ws.cell(row=row, column=c).border = BORDER_THIN
-        ws.cell(row=row, column=1, value="ИТОГО ПО ПРОЕКТУ")
-        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=5)
 
-        for col_target in (C_SUM_CLIENT_GROSS, C_SUM_CLIENT_NET, C_SUM_CONTR_NET):
-            parts = "+".join(f"{_col_letter(col_target)}{tr}" for tr in total_rows)
-            ws.cell(row=row, column=col_target, value=f"={parts}")
-            _money_format(ws.cell(row=row, column=col_target))
+    state["work_block_total"] = _block_total_row(
+        ws, row, "ИТОГО ПО РАБОТАМ", work_section_addrs,
+        fill=PROJECT_TOTAL_FILL, font=WHITE_BOLD,
+    )
+    row += 2
 
-        ws.cell(row=row, column=C_MARGIN_ABS,
-                value=f"={_col_letter(C_SUM_CLIENT_NET)}{row}"
-                      f"-{_col_letter(C_SUM_CONTR_NET)}{row}")
-        _money_format(ws.cell(row=row, column=C_MARGIN_ABS))
-        ws.cell(row=row, column=C_MARGIN_PCT,
-                value=f"=IF({_col_letter(C_SUM_CLIENT_NET)}{row}=0,0,"
-                      f"{_col_letter(C_MARGIN_ABS)}{row}"
-                      f"/{_col_letter(C_SUM_CLIENT_NET)}{row})")
-        _pct_format(ws.cell(row=row, column=C_MARGIN_PCT))
+    # ============================== БЛОК МАТЕРИАЛЫ
+    _block_header_row(ws, row, "📦 МАТЕРИАЛЫ")
+    row += 1
+
+    material_section_addrs: list[dict] = []
+    for section in sections_order:
+        items = material_items_by_section.get(section, [])
+        if not items:
+            continue
+        _section_header_row(ws, row, section)
+        row += 1
+        item_rows: list[int] = []
+        for c_idx, it in items:
+            _write_item_row(ws, row, it, "material", None, contractor.title)
+            item_rows.append(row)
+            row += 1
+        subtotal = _section_subtotal_row(
+            ws, row, f"Итого материалов по разделу: {section}", item_rows,
+        )
+        if subtotal:
+            state["material_section_subtotals"][section] = subtotal
+            material_section_addrs.append(subtotal)
+        row += 1
+
+    state["material_block_total"] = _block_total_row(
+        ws, row, "ИТОГО ПО МАТЕРИАЛАМ", material_section_addrs,
+        fill=PROJECT_TOTAL_FILL, font=WHITE_BOLD,
+    )
+    row += 2
+
+    # ============================== ВСЕГО ПО ПРОЕКТУ
+    project_parts = []
+    if state["work_block_total"] and "sum_net" in state["work_block_total"]:
+        project_parts.append(state["work_block_total"])
+    if state["material_block_total"] and "sum_net" in state["material_block_total"]:
+        project_parts.append(state["material_block_total"])
+
+    state["project_total"] = _block_total_row(
+        ws, row, "ВСЕГО ПО ПРОЕКТУ", project_parts,
+        fill=PROJECT_TOTAL_FILL, font=WHITE_BOLD,
+    )
+    ws.row_dimensions[row].height = 22
+
+    return state
 
 
 # ---------------------------------------------------------- Аналитика
+SUMMARY_SHEET = "'Сводная смета'"
+
+
 def _build_analytics_sheet(ws: Worksheet, client: Estimate, contractor: Estimate,
-                            matches: list[Match]):
+                            matches: list[Match], summary_state: dict):
     ws.title = "Аналитика"
     for col, w in enumerate([42, 22, 22, 18, 14, 26], start=1):
-        ws.column_dimensions[get_column_letter(col)].width = w
+        ws.column_dimensions[_L(col)].width = w
     ws.freeze_panes = "A2"
 
-    match_by_client = {m.client_idx: m for m in matches}
+    work_subs = summary_state.get("work_section_subtotals", {})
+    mat_subs = summary_state.get("material_section_subtotals", {})
+    work_total = summary_state.get("work_block_total")
+    mat_total = summary_state.get("material_block_total")
+    project_total = summary_state.get("project_total")
 
-    # ----- Сбор данных
-    work_by_section: dict[str, dict] = {}
-    material_by_category: dict[str, dict] = {}
-
-    for c_idx, it in enumerate(client.items):
-        qty = it.quantity or 0
-        match = match_by_client.get(c_idx)
-        contractor_item = (
-            contractor.items[match.contractor_idx]
-            if match and match.contractor_idx is not None else None
-        )
-
-        # МАТЕРИАЛ
-        if it.price_material is not None or it.sum_material is not None:
-            sum_mat_gross = (it.sum_material if it.sum_material is not None
-                             else (it.price_material or 0) * qty)
-            sum_mat_net = sum_mat_gross / (1 + VAT_RATE)
-            category = classify_material(it.name)
-            d = material_by_category.setdefault(
-                category, {"client_net": 0.0, "purchase_net": 0.0,
-                           "items": 0, "with_price": 0}
-            )
-            d["client_net"] += sum_mat_net
-            d["items"] += 1
-            # Цена закупки материалов пока не приходит — оставляем 0 + помечаем
-
-        # РАБОТА
-        if it.price_work is not None or it.sum_work is not None:
-            sum_work_gross = (it.sum_work if it.sum_work is not None
-                              else (it.price_work or 0) * qty)
-            sum_work_net = sum_work_gross / (1 + VAT_RATE)
-            s = work_by_section.setdefault(
-                it.section, {"client_net": 0.0, "contractor_net": 0.0,
-                             "items": 0, "matched": 0}
-            )
-            s["client_net"] += sum_work_net
-            s["items"] += 1
-            if contractor_item:
-                s["contractor_net"] += (contractor_item.price_work or 0) * qty
-                s["matched"] += 1
-
-    # ----- Шапка
     row = 1
-    ws.cell(row=row, column=1, value="📊 Аналитика проекта").font = Font(bold=True, size=14)
+    ws.cell(row=row, column=1,
+            value="📊 Аналитика проекта (все цифры — формулы со ссылками на «Сводную смету»)").font = \
+        Font(bold=True, size=12)
     row += 2
 
-    # ----- Метрики проекта
-    total_client_net = sum(s["client_net"] for s in work_by_section.values()) + \
-                       sum(m["client_net"] for m in material_by_category.values())
-    total_contractor_net = sum(s["contractor_net"] for s in work_by_section.values())
+    # ----- метрики проекта
+    ws.cell(row=row, column=1, value="Показатель").font = HEADER_FONT
+    ws.cell(row=row, column=2, value="Значение").font = HEADER_FONT
+    for c in (1, 2):
+        ws.cell(row=row, column=c).fill = HEADER_FILL
+        ws.cell(row=row, column=c).border = BORDER_THIN
+    row += 1
 
-    # «закрытая» маржа — только по работам с матчами
-    closed_client_net = sum(
-        s["client_net"] for s in work_by_section.values() if s["matched"] > 0
-    )
-    closed_margin = closed_client_net - total_contractor_net
-    closed_margin_pct = closed_margin / closed_client_net if closed_client_net else None
+    def _ref(addr_dict, key, default="0"):
+        if addr_dict and key in addr_dict:
+            return f"={SUMMARY_SHEET}!{addr_dict[key]}"
+        return f"={default}"
 
     metrics = [
-        ("Сумма проекта у клиента (без НДС, при НДС 22%)", total_client_net, "#,##0.00 ₽", None),
-        ("Сумма закупки работ у подрядчика (без НДС)", total_contractor_net, "#,##0.00 ₽", None),
-        ("Маржа по закрытым работам (руб.)", closed_margin, "#,##0.00 ₽", None),
-        ("Маржа по закрытым работам, %", closed_margin_pct, "0.0%", closed_margin_pct),
+        ("Сумма проекта у клиента (с НДС 22%)",
+         _ref(project_total, "sum_gross"), "#,##0.00 ₽", None),
+        ("Сумма проекта у клиента (без НДС)",
+         _ref(project_total, "sum_net"), "#,##0.00 ₽", None),
+        ("Сумма закупки работ у подрядчика (без НДС)",
+         _ref(work_total, "sum_purchase"), "#,##0.00 ₽", None),
+        ("Маржа по работам (руб., без НДС)",
+         f"={SUMMARY_SHEET}!{work_total['sum_net']}-{SUMMARY_SHEET}!{work_total['sum_purchase']}"
+         if work_total else "0", "#,##0.00 ₽", None),
+        ("Маржа по работам (%)",
+         f"=IF({SUMMARY_SHEET}!{work_total['sum_net']}=0,0,"
+         f"({SUMMARY_SHEET}!{work_total['sum_net']}-{SUMMARY_SHEET}!{work_total['sum_purchase']})"
+         f"/{SUMMARY_SHEET}!{work_total['sum_net']})"
+         if work_total else "0", "0.0%", "margin"),
         ("Позиций у клиента", len(client.items), "0", None),
-        ("Из них с матчем подрядчика", sum(1 for m in matches if m.contractor_idx is not None), "0", None),
+        ("Из них с матчем подрядчика",
+         sum(1 for m in matches if m.contractor_idx is not None), "0", None),
     ]
     for label, value, fmt, hue in metrics:
         ws.cell(row=row, column=1, value=label).font = Font(bold=True)
-        c = ws.cell(row=row, column=2, value=value)
-        c.number_format = fmt
-        if hue is not None:
-            c.fill = _margin_fill(hue)
-        for col in (1, 2):
-            ws.cell(row=row, column=col).border = BORDER_THIN
+        cell = ws.cell(row=row, column=2, value=value)
+        cell.number_format = fmt
+        # Светофор маржи по работам — оценим по нашим Python-данным
+        if hue == "margin":
+            work_client = sum(
+                ((it.sum_work or 0) / (1 + VAT_RATE))
+                for it in client.items
+                if it.sum_work is not None
+            )
+            work_purchase = 0.0
+            for c_idx, it in enumerate(client.items):
+                if it.kind not in ("work", "mixed", "composite"):
+                    continue
+                m = next((mm for mm in matches if mm.client_idx == c_idx), None)
+                if m and m.contractor_idx is not None:
+                    cp = contractor.items[m.contractor_idx]
+                    work_purchase += (cp.price_work or 0) * (it.quantity or 0)
+            mp = ((work_client - work_purchase) / work_client) if work_client else None
+            cell.fill = _margin_fill(mp)
+        for c in (1, 2):
+            ws.cell(row=row, column=c).border = BORDER_THIN
         row += 1
     row += 2
 
-    # ----- Таблица: маржа по РАБОТАМ
-    ws.cell(row=row, column=1, value="🔧 Работы — маржа по разделам").font = Font(bold=True, size=12)
+    # ----- Маржа по работам — по разделам
+    ws.cell(row=row, column=1,
+            value="🔧 Маржа по работам по разделам").font = Font(bold=True, size=12)
     row += 1
     headers = ["Раздел", "Клиент (без НДС)", "Подрядчик (без НДС)",
                "Маржа, руб.", "Маржа, %", "Статус"]
@@ -451,55 +549,80 @@ def _build_analytics_sheet(ws: Worksheet, client: Estimate, contractor: Estimate
         c.border = BORDER_THIN
     row += 1
 
-    work_first = row
-    for s_name, data in work_by_section.items():
-        ws.cell(row=row, column=1, value=s_name)
-        ws.cell(row=row, column=2, value=data["client_net"]).number_format = "#,##0.00 ₽"
-        ws.cell(row=row, column=3, value=data["contractor_net"]).number_format = "#,##0.00 ₽"
+    work_first_row = row
+    sections_order: list[str] = []
+    seen = set()
+    for it in client.items:
+        if it.section not in seen:
+            sections_order.append(it.section)
+            seen.add(it.section)
 
-        margin_formula = f"=B{row}-C{row}"
-        ws.cell(row=row, column=4, value=margin_formula).number_format = "#,##0.00 ₽"
-        pct_cell = ws.cell(row=row, column=5,
-                            value=f"=IF(B{row}=0,0,D{row}/B{row})")
-        pct_cell.number_format = "0.0%"
+    # счётчик матчей по разделам — для определения статуса
+    matched_counts: dict[str, dict] = {s: {"items": 0, "matched": 0} for s in sections_order}
+    for c_idx, it in enumerate(client.items):
+        if it.kind not in ("work", "mixed", "composite"):
+            continue
+        if it.sum_work is None and it.price_work is None:
+            continue
+        matched_counts[it.section]["items"] += 1
+        m = next((mm for mm in matches if mm.client_idx == c_idx), None)
+        if m and m.contractor_idx is not None:
+            matched_counts[it.section]["matched"] += 1
 
-        if data["matched"] == 0:
+    for section in sections_order:
+        sub = work_subs.get(section)
+        if sub is None:
+            continue
+        ws.cell(row=row, column=1, value=section)
+        ws.cell(row=row, column=2,
+                value=f"={SUMMARY_SHEET}!{sub['sum_net']}").number_format = "#,##0.00 ₽"
+        ws.cell(row=row, column=3,
+                value=f"={SUMMARY_SHEET}!{sub['sum_purchase']}").number_format = "#,##0.00 ₽"
+        ws.cell(row=row, column=4,
+                value=f"=B{row}-C{row}").number_format = "#,##0.00 ₽"
+        pct = ws.cell(row=row, column=5,
+                       value=f"=IF(B{row}=0,0,D{row}/B{row})")
+        pct.number_format = "0.0%"
+
+        cnt = matched_counts.get(section, {"items": 0, "matched": 0})
+        if cnt["matched"] == 0:
             status = "⚠ Нет нижних цен"
-            pct_cell.fill = GREY
-        elif data["matched"] < data["items"]:
-            status = f"Частично: {data['matched']} из {data['items']}"
-            margin_val = (data["client_net"] - data["contractor_net"]) / data["client_net"] \
-                if data["client_net"] else None
-            pct_cell.fill = _margin_fill(margin_val)
+            pct.fill = GREY
+        elif cnt["matched"] < cnt["items"]:
+            status = f"Частично: {cnt['matched']} из {cnt['items']}"
         else:
-            status = f"Закрыто ✓ ({data['items']} поз.)"
-            margin_val = (data["client_net"] - data["contractor_net"]) / data["client_net"] \
-                if data["client_net"] else None
-            pct_cell.fill = _margin_fill(margin_val)
+            status = f"Закрыто ✓ ({cnt['items']} поз.)"
         ws.cell(row=row, column=6, value=status)
         for c in range(1, 7):
             ws.cell(row=row, column=c).border = BORDER_THIN
         row += 1
 
-    # итог по работам
-    if work_first < row:
-        last = row - 1
+    # Итого по работам
+    if work_first_row < row and work_total:
         for c in range(1, 7):
             ws.cell(row=row, column=c).fill = TOTAL_FILL
             ws.cell(row=row, column=c).font = Font(bold=True)
             ws.cell(row=row, column=c).border = BORDER_THIN
         ws.cell(row=row, column=1, value="Итого по работам")
-        ws.cell(row=row, column=2, value=f"=SUM(B{work_first}:B{last})").number_format = "#,##0.00 ₽"
-        ws.cell(row=row, column=3, value=f"=SUM(C{work_first}:C{last})").number_format = "#,##0.00 ₽"
+        ws.cell(row=row, column=2,
+                value=f"={SUMMARY_SHEET}!{work_total['sum_net']}").number_format = "#,##0.00 ₽"
+        ws.cell(row=row, column=3,
+                value=f"={SUMMARY_SHEET}!{work_total['sum_purchase']}").number_format = "#,##0.00 ₽"
         ws.cell(row=row, column=4, value=f"=B{row}-C{row}").number_format = "#,##0.00 ₽"
         ws.cell(row=row, column=5,
                 value=f"=IF(B{row}=0,0,D{row}/B{row})").number_format = "0.0%"
         row += 1
     row += 2
 
-    # ----- Таблица: маржа по МАТЕРИАЛАМ (по категориям)
+    # ----- Маржа по материалам — по категориям
+    # Категоризируем материалы из клиентской сметы и связываем с строками на «Сводной смете»
+    # Для аналитики берём суммы из «Сводной смете» — но категории нужно агрегировать.
+    # Сначала строим адреса строк материалов на листе «Сводная смета».
+    # У нас на «Сводной смете» материалы лежат в блоке МАТЕРИАЛЫ по разделам.
+    # Для категорий — пересчитаем по нашим данным (без НДС) и положим как формулы /1.22 в Excel.
+
     ws.cell(row=row, column=1,
-            value="📦 Материалы — по категориям").font = Font(bold=True, size=12)
+            value="📦 Материалы по категориям").font = Font(bold=True, size=12)
     row += 1
     headers = ["Категория", "Клиент (без НДС)", "Закупка (без НДС)",
                "Маржа, руб.", "Маржа, %", "Статус"]
@@ -510,28 +633,42 @@ def _build_analytics_sheet(ws: Worksheet, client: Estimate, contractor: Estimate
         c.border = BORDER_THIN
     row += 1
 
-    mat_first = row
-    category_order = ["Лотки", "Кабель и проводка", "Зарядные станции",
-                      "Шкафы и щиты", "Другое"]
-    for category in category_order:
-        if category not in material_by_category:
+    # агрегаты по категориям (без НДС, на клиенте)
+    cat_totals: dict[str, float] = {}
+    cat_counts: dict[str, int] = {}
+    for it in client.items:
+        if it.price_material is None and it.sum_material is None:
             continue
-        data = material_by_category[category]
+        sum_mat_gross = it.sum_material if it.sum_material is not None \
+            else (it.price_material or 0) * (it.quantity or 0)
+        sum_mat_net = sum_mat_gross / (1 + VAT_RATE)
+        category = classify_material(it.name)
+        cat_totals[category] = cat_totals.get(category, 0.0) + sum_mat_net
+        cat_counts[category] = cat_counts.get(category, 0) + 1
+
+    mat_first_row = row
+    for category in ["Лотки", "Кабель и проводка", "Зарядные станции",
+                     "Шкафы и щиты", "Другое"]:
+        if category not in cat_totals:
+            continue
         ws.cell(row=row, column=1, value=category)
-        ws.cell(row=row, column=2, value=data["client_net"]).number_format = "#,##0.00 ₽"
-        ws.cell(row=row, column=3, value=data["purchase_net"]).number_format = "#,##0.00 ₽"
-        ws.cell(row=row, column=4, value=f"=B{row}-C{row}").number_format = "#,##0.00 ₽"
-        pct_cell = ws.cell(row=row, column=5,
-                            value=f"=IF(B{row}=0,0,D{row}/B{row})")
-        pct_cell.number_format = "0.0%"
-        pct_cell.fill = GREY
+        ws.cell(row=row, column=2,
+                value=cat_totals[category]).number_format = "#,##0.00 ₽"
+        ws.cell(row=row, column=3, value=0).number_format = "#,##0.00 ₽"
+        ws.cell(row=row, column=4,
+                value=f"=B{row}-C{row}").number_format = "#,##0.00 ₽"
+        pct = ws.cell(row=row, column=5,
+                       value=f"=IF(B{row}=0,0,D{row}/B{row})")
+        pct.number_format = "0.0%"
+        pct.fill = GREY
         ws.cell(row=row, column=6,
-                value=f"⚠ Нет цен закупки ({data['items']} поз.)").font = Font(italic=True)
+                value=f"⚠ Нет цен закупки ({cat_counts[category]} поз.)").font = \
+            Font(italic=True)
         for c in range(1, 7):
             ws.cell(row=row, column=c).border = BORDER_THIN
         row += 1
 
-    if mat_first < row:
+    if mat_first_row < row:
         last = row - 1
         for c in range(1, 7):
             ws.cell(row=row, column=c).fill = TOTAL_FILL
@@ -539,10 +676,11 @@ def _build_analytics_sheet(ws: Worksheet, client: Estimate, contractor: Estimate
             ws.cell(row=row, column=c).border = BORDER_THIN
         ws.cell(row=row, column=1, value="Итого по материалам")
         ws.cell(row=row, column=2,
-                value=f"=SUM(B{mat_first}:B{last})").number_format = "#,##0.00 ₽"
+                value=f"=SUM(B{mat_first_row}:B{last})").number_format = "#,##0.00 ₽"
         ws.cell(row=row, column=3,
-                value=f"=SUM(C{mat_first}:C{last})").number_format = "#,##0.00 ₽"
-        ws.cell(row=row, column=4, value=f"=B{row}-C{row}").number_format = "#,##0.00 ₽"
+                value=f"=SUM(C{mat_first_row}:C{last})").number_format = "#,##0.00 ₽"
+        ws.cell(row=row, column=4,
+                value=f"=B{row}-C{row}").number_format = "#,##0.00 ₽"
         ws.cell(row=row, column=5,
                 value=f"=IF(B{row}=0,0,D{row}/B{row})").number_format = "0.0%"
 
@@ -559,22 +697,20 @@ def _build_raw_sheet(ws: Worksheet, estimate: Estimate, title: str):
         c.font = HEADER_FONT
         c.fill = HEADER_FILL
         c.border = BORDER_THIN
-        ws.column_dimensions[get_column_letter(i)].width = w
+        ws.column_dimensions[_L(i)].width = w
     ws.freeze_panes = "A2"
 
-    # Группируем по разделам с итогами
-    sections_in_order: list[str] = []
+    sections_order: list[str] = []
     seen = set()
     for it in estimate.items:
         if it.section not in seen:
-            sections_in_order.append(it.section)
+            sections_order.append(it.section)
             seen.add(it.section)
 
     row = 2
     section_total_rows: list[int] = []
 
-    for section in sections_in_order:
-        # Заголовок раздела
+    for section in sections_order:
         for c in range(1, ncols + 1):
             ws.cell(row=row, column=c).fill = SECTION_FILL
             ws.cell(row=row, column=c).border = BORDER_THIN
@@ -595,12 +731,10 @@ def _build_raw_sheet(ws: Worksheet, estimate: Estimate, title: str):
             ws.cell(row=row, column=6, value=it.quantity).number_format = "#,##0.00"
 
             qty_ref = f"F{row}"
-            # Цены и суммы — формулы где возможно
             if it.price_material is not None:
                 ws.cell(row=row, column=7, value=it.price_material).number_format = "#,##0.00"
             if it.price_work is not None:
                 ws.cell(row=row, column=8, value=it.price_work).number_format = "#,##0.00"
-            # Сумма мат. = qty * price_mat если оба есть, иначе ставим значение
             if it.price_material is not None and it.quantity is not None:
                 ws.cell(row=row, column=9, value=f"={qty_ref}*G{row}").number_format = "#,##0.00"
             elif it.sum_material is not None:
@@ -609,7 +743,6 @@ def _build_raw_sheet(ws: Worksheet, estimate: Estimate, title: str):
                 ws.cell(row=row, column=10, value=f"={qty_ref}*H{row}").number_format = "#,##0.00"
             elif it.sum_work is not None:
                 ws.cell(row=row, column=10, value=it.sum_work).number_format = "#,##0.00"
-            # Итого = сумма мат + сумма раб
             ws.cell(row=row, column=11,
                     value=f"=IFERROR(I{row},0)+IFERROR(J{row},0)").number_format = "#,##0.00"
 
@@ -618,7 +751,6 @@ def _build_raw_sheet(ws: Worksheet, estimate: Estimate, title: str):
             item_rows.append(row)
             row += 1
 
-        # Итог по разделу
         if item_rows:
             first = item_rows[0]
             last = item_rows[-1]
@@ -636,14 +768,13 @@ def _build_raw_sheet(ws: Worksheet, estimate: Estimate, title: str):
                     value=f"=SUM(K{first}:K{last})").number_format = "#,##0.00"
             section_total_rows.append(row)
             row += 1
-        row += 1  # пустая строка
+        row += 1
 
-    # Финальный итог
     if section_total_rows:
         row += 1
         for c in range(1, ncols + 1):
             ws.cell(row=row, column=c).fill = PROJECT_TOTAL_FILL
-            ws.cell(row=row, column=c).font = PROJECT_FONT
+            ws.cell(row=row, column=c).font = WHITE_BOLD
             ws.cell(row=row, column=c).border = BORDER_THIN
         ws.cell(row=row, column=1, value=f"ИТОГО ПО СМЕТЕ: {estimate.title}")
         ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=8)
@@ -656,8 +787,8 @@ def _build_raw_sheet(ws: Worksheet, estimate: Estimate, title: str):
 def build_workbook(client: Estimate, contractor: Estimate,
                     matches: list[Match]) -> io.BytesIO:
     wb = Workbook()
-    _build_summary_sheet(wb.active, client, contractor, matches)
-    _build_analytics_sheet(wb.create_sheet(), client, contractor, matches)
+    summary_state = _build_summary_sheet(wb.active, client, contractor, matches)
+    _build_analytics_sheet(wb.create_sheet(), client, contractor, matches, summary_state)
     _build_raw_sheet(wb.create_sheet(), client, "Исходник клиента")
     _build_raw_sheet(wb.create_sheet(), contractor, "Исходник подрядчика")
     buf = io.BytesIO()
