@@ -50,6 +50,20 @@ class Match:
 
 
 @dataclass
+class MaterialMatch:
+    """AI-сопоставление материала клиента с позицией счёта поставщика.
+
+    Используется на вкладке «Сводная смета» для подстановки цены закупки.
+    """
+    client_idx: int                                # индекс в Estimate.items клиента
+    invoice_item_id: Optional[int]                 # id из таблицы invoice_items; None = нет соответствия
+    confidence: float                               # 0..1
+    reason: str
+    match_kind: str = "semantic"                    # 'article' | 'semantic' | 'none'
+    confirmed: bool = False
+
+
+@dataclass
 class SupplierInvoiceItem:
     """Позиция в счёте поставщика."""
     line_no: Optional[int]               # номер п/п в счёте

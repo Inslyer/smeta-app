@@ -18,8 +18,8 @@ from core import db
 from core.parser_client import parse_client_estimate
 from core.parser_contractor import parse_contractor_estimate
 from core.exporter import build_workbook, filename_for
-from core.matcher import match_estimates
-from core.models import Estimate, Match, SupplierInvoice
+from core.matcher import match_estimates, match_materials
+from core.models import Estimate, MaterialMatch, Match, SupplierInvoice
 from core.parser_supplier_invoice import parse_invoice
 
 # Явный путь к .env — иначе Streamlit его не находит при запуске не из cwd проекта
@@ -292,6 +292,132 @@ with tab_summary:
                 f"🟢 уверенных: **{green}**  ·  🟡 с оговорками: **{yellow}**  ·  "
                 f"🟠 спорных: **{orange}**  ·  ⚪️ без пары: **{none}**"
             )
+
+            # ============================================================
+            # Сопоставление МАТЕРИАЛОВ клиента со счетами поставщиков
+            # ============================================================
+            st.divider()
+            st.subheader("🧾 Цены закупки материалов — из счетов поставщиков")
+            st.caption(
+                "Выберите проект — Claude сопоставит материалы из сметы клиента "
+                "с позициями загруженных счетов и подставит цены закупки."
+            )
+
+            mat_projects = db.list_projects()
+            if not mat_projects:
+                st.info(
+                    "Нет ни одного проекта. Создайте его на вкладке "
+                    "«📦 Счета поставщиков» и загрузите туда счета."
+                )
+            else:
+                mat_proj_options = ["— выбрать проект —"] + [
+                    p["name"] for p in mat_projects
+                ]
+                mat_chosen = st.selectbox(
+                    "Проект для подстановки цен закупки",
+                    mat_proj_options,
+                    key="materials_project_sel",
+                )
+                mat_project_id = None
+                if mat_chosen != "— выбрать проект —":
+                    mat_project = db.get_project_by_name(mat_chosen)
+                    if mat_project:
+                        mat_project_id = mat_project["id"]
+
+                if mat_project_id:
+                    supplier_rows = db.all_invoice_items_for_project(mat_project_id)
+                    if not supplier_rows:
+                        st.info(
+                            f"По проекту «{mat_chosen}» ещё нет загруженных "
+                            "счетов. Загрузите их на вкладке «📦 Счета "
+                            "поставщиков»."
+                        )
+                    else:
+                        st.caption(
+                            f"Позиций в счетах проекта: **{len(supplier_rows)}**"
+                        )
+                        col_mat_act, col_mat_info = st.columns([1, 3])
+                        with col_mat_act:
+                            if st.button("🧮 Подобрать цены закупки",
+                                          type="primary",
+                                          key="run_match_materials"):
+                                with st.spinner("Claude сопоставляет материалы..."):
+                                    try:
+                                        m_matches, m_meta = match_materials(
+                                            client, supplier_rows,
+                                        )
+                                        st.session_state["mat_matches"] = m_matches
+                                        st.session_state["mat_meta"] = m_meta
+                                        st.session_state["mat_supplier_rows"] = supplier_rows
+                                    except Exception as e:
+                                        st.error(f"Ошибка сопоставления: {e}")
+                            if st.button("🗑 Сбросить", key="clear_mat_matches"):
+                                for k in ("mat_matches", "mat_meta", "mat_supplier_rows"):
+                                    st.session_state.pop(k, None)
+                        with col_mat_info:
+                            mm = st.session_state.get("mat_meta")
+                            if mm:
+                                if mm.get("from_cache"):
+                                    st.caption("📦 Из кэша")
+                                else:
+                                    st.caption(
+                                        f"🧠 Модель: `{mm.get('model', '?')}` · "
+                                        f"токены: in={mm.get('input_tokens')}, "
+                                        f"out={mm.get('output_tokens')}"
+                                    )
+
+                    m_matches: list[MaterialMatch] | None = st.session_state.get("mat_matches")
+                    cached_supplier_rows = st.session_state.get("mat_supplier_rows", [])
+                    if m_matches and cached_supplier_rows:
+                        # Индексируем supplier_rows по id для быстрого lookup
+                        by_id = {r["id"]: r for r in cached_supplier_rows}
+                        mat_rows = []
+                        for mm in m_matches:
+                            c_item = client.items[mm.client_idx]
+                            s_row = by_id.get(mm.invoice_item_id) if mm.invoice_item_id else None
+                            if mm.confidence >= 0.9 and s_row is not None:
+                                badge = "🟢"
+                            elif mm.confidence >= 0.7 and s_row is not None:
+                                badge = "🟡"
+                            elif mm.confidence >= 0.4 and s_row is not None:
+                                badge = "🟠"
+                            else:
+                                badge = "🔴" if s_row else "⚪️"
+                            kind_badge = {"article": "🔑", "semantic": "💬",
+                                           "none": "—"}.get(mm.match_kind, "")
+                            mat_rows.append({
+                                "Уверен.": f"{badge} {mm.confidence:.0%}",
+                                "Тип": kind_badge,
+                                "Раздел клиента": c_item.section,
+                                "Материал клиента": c_item.name,
+                                "Кол-во клиента": f"{c_item.quantity} {c_item.unit}",
+                                "Цена клиента (мат.)": c_item.price_material,
+                                "Позиция в счёте": s_row["name"] if s_row else "— нет —",
+                                "Артикул": (s_row.get("article_supplier")
+                                              or s_row.get("article_manufacturer"))
+                                              if s_row else None,
+                                "Цена закупки": s_row.get("unit_price") if s_row else None,
+                                "Поставщик": s_row.get("supplier_name") if s_row else None,
+                                "Счёт": (
+                                    f"№{s_row.get('invoice_number')} от "
+                                    f"{s_row.get('invoice_date')}"
+                                ) if s_row else None,
+                                "Обоснование": mm.reason,
+                            })
+                        st.dataframe(
+                            pd.DataFrame(mat_rows),
+                            width="stretch",
+                            hide_index=True,
+                        )
+                        m_green = sum(1 for x in m_matches
+                                       if x.confidence >= 0.9 and x.invoice_item_id)
+                        m_article = sum(1 for x in m_matches
+                                         if x.match_kind == "article")
+                        m_none = sum(1 for x in m_matches if not x.invoice_item_id)
+                        st.caption(
+                            f"🔑 по артикулу: **{m_article}**  ·  🟢 уверенных: "
+                            f"**{m_green}**  ·  ⚪️ без пары: **{m_none}**"
+                        )
 
             st.divider()
             st.subheader("📥 Скачать сводную смету")
