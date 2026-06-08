@@ -22,7 +22,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
-from .models import Estimate, EstimateItem, Match
+from .models import Estimate, EstimateItem, MaterialMatch, Match
 
 
 VAT_RATE = 0.22
@@ -179,8 +179,15 @@ def _write_item_row(
     kind: str,                            # "work" или "material"
     contractor_item: Optional[EstimateItem],
     contractor_title: str,
+    *,
+    supplier_row: Optional[dict] = None,  # позиция из счёта поставщика (для материалов)
 ):
-    """Записывает строку. kind определяет какую цену клиента взять (мат/раб)."""
+    """Записывает строку. kind определяет какую цену клиента взять (мат/раб).
+
+    supplier_row — позиция счёта поставщика (dict из db.all_invoice_items_for_project)
+    с полями: name, article_supplier, article_manufacturer, unit_price, vat_included,
+    vat_rate, supplier_name, invoice_number, invoice_date. Если задан и kind=="material",
+    эти данные пойдут в колонки «закупка» вместо подрядчика."""
     qty = item.quantity or 0
     unit_price_gross = (item.price_work if kind == "work" else item.price_material)
 
@@ -211,21 +218,53 @@ def _write_item_row(
                 value=f"={_L(QTY)}{row}*{_L(UNIT_PRICE_NET)}{row}")
         _money_format(ws.cell(row=row, column=SUM_NET))
 
-    # Закупка — только для work и если есть подрядчик
-    has_purchase = (kind == "work" and contractor_item is not None
-                    and contractor_item.price_work is not None)
-    if has_purchase:
-        ws.cell(row=row, column=UNIT_PRICE_PURCHASE,
-                value=contractor_item.price_work)
+    # ----- Закупка -----
+    purchase_unit_price_net: Optional[float] = None
+    bottom_name: Optional[str] = None
+    executor_label: Optional[str] = None
+
+    if kind == "work" and contractor_item is not None \
+            and contractor_item.price_work is not None:
+        # Цены подрядчика в нашем парсере уже без НДС
+        purchase_unit_price_net = contractor_item.price_work
+        bottom_name = contractor_item.name
+        executor_label = contractor_title
+    elif kind == "material" and supplier_row is not None \
+            and supplier_row.get("unit_price") is not None:
+        # Цена из счёта поставщика. В счёте может быть с НДС или без.
+        raw_price = float(supplier_row["unit_price"])
+        if supplier_row.get("vat_included"):
+            vat_rate = supplier_row.get("vat_rate") or VAT_RATE
+            purchase_unit_price_net = raw_price / (1 + vat_rate)
+        else:
+            purchase_unit_price_net = raw_price
+
+        # Имя в нижней строке — позиция из счёта + артикул (если есть)
+        art = (supplier_row.get("article_supplier")
+                or supplier_row.get("article_manufacturer"))
+        name_with_art = supplier_row["name"]
+        if art:
+            name_with_art = f"[{art}] {name_with_art}"
+        bottom_name = name_with_art
+
+        sup_name = supplier_row.get("supplier_name") or "—"
+        inv_no = supplier_row.get("invoice_number") or "—"
+        inv_dt = supplier_row.get("invoice_date") or ""
+        executor_label = f"{sup_name} • счёт №{inv_no}"
+        if inv_dt:
+            executor_label += f" от {inv_dt}"
+
+    if purchase_unit_price_net is not None:
+        ws.cell(row=row, column=UNIT_PRICE_PURCHASE, value=purchase_unit_price_net)
         _money_format(ws.cell(row=row, column=UNIT_PRICE_PURCHASE))
 
         ws.cell(row=row, column=SUM_PURCHASE,
                 value=f"={_L(QTY)}{row}*{_L(UNIT_PRICE_PURCHASE)}{row}")
         _money_format(ws.cell(row=row, column=SUM_PURCHASE))
 
-        ws.cell(row=row, column=NAME_BOTTOM, value=contractor_item.name).alignment = \
+        ws.cell(row=row, column=NAME_BOTTOM, value=bottom_name).alignment = \
             Alignment(wrap_text=True, vertical="top")
-        ws.cell(row=row, column=EXECUTOR, value=contractor_title)
+        ws.cell(row=row, column=EXECUTOR, value=executor_label)
 
         # Маржа
         ws.cell(row=row, column=MARGIN_ABS,
@@ -238,9 +277,9 @@ def _write_item_row(
         _pct_format(pct_cell)
 
         # Светофор маржи — статически по нашим значениям
-        if unit_price_gross and contractor_item.price_work and qty:
+        if unit_price_gross and qty:
             client_net = qty * unit_price_gross / (1 + VAT_RATE)
-            purchase_net = qty * contractor_item.price_work
+            purchase_net = qty * purchase_unit_price_net
             mp = (client_net - purchase_net) / client_net if client_net else None
             pct_cell.fill = _margin_fill(mp)
     else:
@@ -339,11 +378,23 @@ def _block_total_row(ws, row: int, label: str,
 
 
 def _build_summary_sheet(ws: Worksheet, client: Estimate, contractor: Estimate,
-                          matches: list[Match]):
+                          matches: list[Match],
+                          material_matches: Optional[list[MaterialMatch]] = None,
+                          supplier_rows: Optional[list[dict]] = None):
     ws.title = "Сводная смета"
     _write_headers(ws)
 
     match_by_client = {m.client_idx: m for m in matches}
+
+    # Карта: индекс клиентской позиции -> dict позиции счёта (если найден матч)
+    supplier_by_client_idx: dict[int, dict] = {}
+    if material_matches and supplier_rows:
+        supplier_by_id = {r["id"]: r for r in supplier_rows}
+        for mm in material_matches:
+            if mm.invoice_item_id is not None and mm.confidence >= 0.4:
+                row = supplier_by_id.get(mm.invoice_item_id)
+                if row:
+                    supplier_by_client_idx[mm.client_idx] = row
 
     sections_order: list[str] = []
     seen = set()
@@ -422,7 +473,11 @@ def _build_summary_sheet(ws: Worksheet, client: Estimate, contractor: Estimate,
         row += 1
         item_rows: list[int] = []
         for c_idx, it in items:
-            _write_item_row(ws, row, it, "material", None, contractor.title)
+            sup_row = supplier_by_client_idx.get(c_idx)
+            _write_item_row(
+                ws, row, it, "material", None, contractor.title,
+                supplier_row=sup_row,
+            )
             item_rows.append(row)
             row += 1
         subtotal = _section_subtotal_row(
@@ -785,9 +840,21 @@ def _build_raw_sheet(ws: Worksheet, estimate: Estimate, title: str):
 
 # ---------------------------------------------------------- Сборка
 def build_workbook(client: Estimate, contractor: Estimate,
-                    matches: list[Match]) -> io.BytesIO:
+                    matches: list[Match],
+                    material_matches: Optional[list[MaterialMatch]] = None,
+                    supplier_rows: Optional[list[dict]] = None) -> io.BytesIO:
+    """Собирает Excel со сводной сметой.
+
+    material_matches + supplier_rows — опционально. Если переданы, в строках
+    материалов будут проставлены цена закупки, поставщик и № счёта, а маржа
+    по материалам посчитается формулами.
+    """
     wb = Workbook()
-    summary_state = _build_summary_sheet(wb.active, client, contractor, matches)
+    summary_state = _build_summary_sheet(
+        wb.active, client, contractor, matches,
+        material_matches=material_matches,
+        supplier_rows=supplier_rows,
+    )
     _build_analytics_sheet(wb.create_sheet(), client, contractor, matches, summary_state)
     _build_raw_sheet(wb.create_sheet(), client, "Исходник клиента")
     _build_raw_sheet(wb.create_sheet(), contractor, "Исходник подрядчика")

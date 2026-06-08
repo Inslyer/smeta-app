@@ -426,7 +426,11 @@ with tab_summary:
                 "«Аналитика», и исходники обеих смет для аудита."
             )
             try:
-                xlsx_bytes = build_workbook(client, contractor, matches)
+                xlsx_bytes = build_workbook(
+                    client, contractor, matches,
+                    material_matches=st.session_state.get("mat_matches"),
+                    supplier_rows=st.session_state.get("mat_supplier_rows"),
+                )
                 st.download_button(
                     label="💾 Скачать Excel со сводной сметой",
                     data=xlsx_bytes,
