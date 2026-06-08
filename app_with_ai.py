@@ -19,7 +19,8 @@ from core.parser_client import parse_client_estimate
 from core.parser_contractor import parse_contractor_estimate
 from core.exporter import build_workbook, filename_for
 from core.matcher import match_estimates
-from core.models import Estimate, Match
+from core.models import Estimate, Match, SupplierInvoice
+from core.parser_supplier_invoice import parse_invoice
 
 # Явный путь к .env — иначе Streamlit его не находит при запуске не из cwd проекта
 ENV_PATH = Path(__file__).resolve().parent / ".env"
@@ -105,7 +106,11 @@ with st.sidebar:
 
 
 # --------------------------------------------------------------------- Main
-tab_upload, tab_summary = st.tabs(["📤 Загрузка смет", "📊 Сводная смета"])
+tab_upload, tab_summary, tab_invoices = st.tabs([
+    "📤 Загрузка смет",
+    "📊 Сводная смета",
+    "📦 Счета поставщиков",
+])
 
 with tab_upload:
     col1, col2 = st.columns(2)
@@ -277,3 +282,209 @@ with tab_summary:
                 st.error(f"Не удалось собрать Excel: {e}")
         else:
             st.info("Нажмите «Сопоставить позиции», чтобы Claude построил пары.")
+
+
+# =====================================================================
+# Вкладка: Счета поставщиков
+# =====================================================================
+def _invoice_items_to_df(invoice: SupplierInvoice) -> pd.DataFrame:
+    return pd.DataFrame([
+        {
+            "№": it.line_no,
+            "Артикул поставщика": it.article_supplier,
+            "Артикул производителя": it.article_manufacturer,
+            "Наименование": it.name,
+            "Ед.": it.unit,
+            "Кол-во": it.quantity,
+            "Цена за ед.": it.unit_price,
+            "НДС %": f"{it.vat_rate*100:.0f}%" if it.vat_rate else "—",
+            "С НДС": "да" if it.vat_included else "нет",
+            "Сумма": round(it.quantity * it.unit_price, 2),
+        }
+        for it in invoice.items
+    ])
+
+
+with tab_invoices:
+    st.subheader("📦 Счета поставщиков по проектам")
+    st.caption(
+        "Закупщик загружает счёт от поставщика — Claude парсит позиции, "
+        "вы подтверждаете, и цены сохраняются в базе для подстановки в сводную смету."
+    )
+
+    # --- Проекты ----------------------------------------------------------
+    projects = db.list_projects()
+    project_names = ["— выбрать проект —"] + [p["name"] for p in projects] + ["➕ Новый проект"]
+
+    col_p1, col_p2 = st.columns([2, 3])
+    with col_p1:
+        chosen = st.selectbox("Проект", project_names, key="invoice_project_sel")
+    with col_p2:
+        new_project_name = ""
+        if chosen == "➕ Новый проект":
+            new_project_name = st.text_input(
+                "Название нового проекта",
+                placeholder="название объекта",
+            )
+            if new_project_name.strip() and st.button("Создать проект"):
+                db.upsert_project(new_project_name.strip())
+                st.success(f"Создан проект: {new_project_name}")
+                st.rerun()
+
+    project_id: int | None = None
+    project_name: str | None = None
+    if chosen not in ("— выбрать проект —", "➕ Новый проект"):
+        project = db.get_project_by_name(chosen)
+        if project:
+            project_id = project["id"]
+            project_name = project["name"]
+
+    if not project_id:
+        st.info("Выберите или создайте проект, чтобы загружать к нему счета.")
+        st.stop()
+
+    st.divider()
+
+    # --- Загрузка нового счёта -------------------------------------------
+    st.markdown("### ⬆️ Загрузить новый счёт")
+
+    suppliers_material = [s for s in db.list_suppliers() if s["kind"] == "material"]
+    if not suppliers_material:
+        st.warning(
+            "Нет ни одного поставщика материалов. Добавьте его в боковой "
+            "панели (раздел «Поставщики и подрядчики»)."
+        )
+    else:
+        col_s, col_f = st.columns([1, 2])
+        with col_s:
+            supplier_options = {s["name"]: s["id"] for s in suppliers_material}
+            chosen_supplier = st.selectbox(
+                "Поставщик",
+                list(supplier_options.keys()),
+                key="invoice_supplier_sel",
+            )
+            supplier_id = supplier_options[chosen_supplier]
+        with col_f:
+            invoice_file = st.file_uploader(
+                "Файл счёта (PDF или Excel)",
+                type=["pdf", "xlsx", "xls"],
+                key="invoice_uploader",
+            )
+
+        if invoice_file is not None:
+            cache_key = f"parsed_invoice::{invoice_file.name}::{invoice_file.size}"
+            parsed: SupplierInvoice | None = st.session_state.get(cache_key)
+
+            if parsed is None:
+                with st.spinner("Claude читает счёт..."):
+                    try:
+                        tmp_path = _save_upload(invoice_file)
+                        parsed = parse_invoice(tmp_path)
+                        st.session_state[cache_key] = parsed
+                    except Exception as e:
+                        st.error(f"Не удалось распарсить счёт: {e}")
+                        parsed = None
+
+            if parsed is not None:
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Поставщик", parsed.supplier_name[:24])
+                c2.metric("Счёт", parsed.invoice_number or "—")
+                c3.metric("Дата", parsed.invoice_date or "—")
+                total_disp = (
+                    f"{parsed.total_with_vat:,.0f} ₽".replace(",", " ")
+                    if parsed.total_with_vat else "—"
+                )
+                c4.metric("Итого с НДС", total_disp)
+
+                if parsed.project_tag:
+                    st.caption(
+                        f"ℹ️ В счёте указано примечание / тег: «{parsed.project_tag}» "
+                        f"(носит справочный характер — привязка к проекту делается "
+                        f"вашим выбором выше)."
+                    )
+
+                st.markdown(f"**Позиции ({len(parsed.items)}):**")
+                st.dataframe(
+                    _invoice_items_to_df(parsed),
+                    width="stretch",
+                    hide_index=True,
+                )
+
+                save_col, _ = st.columns([1, 4])
+                with save_col:
+                    if st.button("💾 Сохранить счёт", type="primary",
+                                  key=f"save_{cache_key}"):
+                        try:
+                            invoice_id = db.save_invoice(
+                                supplier_id=supplier_id,
+                                project_id=project_id,
+                                invoice_number=parsed.invoice_number,
+                                invoice_date=parsed.invoice_date,
+                                total_without_vat=parsed.total_without_vat,
+                                total_with_vat=parsed.total_with_vat,
+                                source_file=parsed.source_file,
+                                items=[
+                                    {
+                                        "line_no": it.line_no,
+                                        "name": it.name,
+                                        "article_supplier": it.article_supplier,
+                                        "article_manufacturer": it.article_manufacturer,
+                                        "unit": it.unit,
+                                        "quantity": it.quantity,
+                                        "unit_price": it.unit_price,
+                                        "vat_rate": it.vat_rate,
+                                        "vat_included": it.vat_included,
+                                    }
+                                    for it in parsed.items
+                                ],
+                            )
+                            st.success(
+                                f"✅ Счёт сохранён в проект «{project_name}» "
+                                f"(id={invoice_id})."
+                            )
+                            st.session_state.pop(cache_key, None)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Не удалось сохранить: {e}")
+
+    st.divider()
+
+    # --- Список ранее загруженных счетов ---------------------------------
+    st.markdown(f"### 📋 Загруженные счета по проекту «{project_name}»")
+    invoices = db.list_invoices(project_id=project_id)
+    if not invoices:
+        st.info("По этому проекту ещё нет загруженных счетов.")
+    else:
+        for inv in invoices:
+            header = (
+                f"**{inv['supplier_name']}** · "
+                f"счёт №{inv['invoice_number'] or '—'} от "
+                f"{inv['invoice_date'] or '—'} · "
+                f"итого с НДС: "
+                f"{(inv['total_with_vat'] or 0):,.0f} ₽".replace(",", " ")
+            )
+            with st.expander(header):
+                items = db.list_invoice_items(inv["id"])
+                if items:
+                    df = pd.DataFrame([dict(r) for r in items])
+                    show_cols = [
+                        "line_no", "article_supplier", "article_manufacturer",
+                        "name", "unit", "quantity", "unit_price",
+                        "vat_rate", "vat_included",
+                    ]
+                    df = df[[c for c in show_cols if c in df.columns]]
+                    df = df.rename(columns={
+                        "line_no": "№",
+                        "article_supplier": "Арт. поставщика",
+                        "article_manufacturer": "Арт. производителя",
+                        "name": "Наименование",
+                        "unit": "Ед.",
+                        "quantity": "Кол-во",
+                        "unit_price": "Цена",
+                        "vat_rate": "НДС",
+                        "vat_included": "С НДС",
+                    })
+                    st.dataframe(df, width="stretch", hide_index=True)
+                if st.button("🗑 Удалить счёт", key=f"del_inv_{inv['id']}"):
+                    db.delete_invoice(inv["id"])
+                    st.rerun()
