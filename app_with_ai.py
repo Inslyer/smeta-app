@@ -30,12 +30,21 @@ load_dotenv(ENV_PATH)
 # На Streamlit Cloud переменные из Settings → Secrets доступны через st.secrets.
 # Прокидываем их в окружение, чтобы код, читающий os.getenv(...), работал
 # одинаково локально и в облаке.
+_secrets_loaded: list[str] = []
+_secrets_error: str | None = None
 try:
-    for _k, _v in dict(st.secrets).items():
-        os.environ.setdefault(_k, str(_v))
-except Exception:
-    # st.secrets отсутствует / не настроен — это нормально для локального запуска
-    pass
+    # st.secrets ведёт себя как mapping — итерируемся по ключам напрямую
+    for _k in list(st.secrets):
+        try:
+            _v = st.secrets[_k]
+            if isinstance(_v, (str, int, float, bool)):
+                os.environ.setdefault(_k, str(_v))
+                _secrets_loaded.append(_k)
+        except Exception as _e:
+            _secrets_error = f"{_k}: {_e}"
+except Exception as _e:
+    # st.secrets вообще недоступен (локальный запуск без secrets.toml)
+    _secrets_error = f"st.secrets unavailable: {_e}"
 
 db.init_db()
 
@@ -91,6 +100,15 @@ with st.sidebar:
     st.header("⚙️ Настройки")
     st.caption(f"Модель: `{os.getenv('CLAUDE_MODEL', 'claude-sonnet-4-6')}`")
     st.caption(f"База цен: `{db.db_label()}`")
+
+    with st.expander("🩺 Диагностика окружения"):
+        st.write({
+            "ANTHROPIC_API_KEY": "✓ задан" if os.getenv("ANTHROPIC_API_KEY") else "✗ нет",
+            "DATABASE_URL": "✓ задан" if os.getenv("DATABASE_URL") else "✗ нет (fallback на SQLite)",
+            "secrets из st.secrets": _secrets_loaded or "пусто",
+            "ошибка чтения secrets": _secrets_error or "—",
+            "backend": db.db_label(),
+        })
 
     st.divider()
     st.subheader("Поставщики и подрядчики")
