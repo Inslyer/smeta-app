@@ -25,6 +25,18 @@ from core.parser_supplier_invoice import parse_invoice
 # Явный путь к .env — иначе Streamlit его не находит при запуске не из cwd проекта
 ENV_PATH = Path(__file__).resolve().parent / ".env"
 load_dotenv(ENV_PATH)
+
+# Мост Streamlit secrets → os.environ.
+# На Streamlit Cloud переменные из Settings → Secrets доступны через st.secrets.
+# Прокидываем их в окружение, чтобы код, читающий os.getenv(...), работал
+# одинаково локально и в облаке.
+try:
+    for _k, _v in dict(st.secrets).items():
+        os.environ.setdefault(_k, str(_v))
+except Exception:
+    # st.secrets отсутствует / не настроен — это нормально для локального запуска
+    pass
+
 db.init_db()
 
 st.set_page_config(
