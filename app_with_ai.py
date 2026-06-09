@@ -59,7 +59,8 @@ except Exception as _e:
 db.init_db()
 
 ASSETS_DIR = Path(__file__).resolve().parent / "assets"
-LOGO_MARK = ASSETS_DIR / "graftio_planet.svg"
+LOGO_MARK = ASSETS_DIR / "graftio_symbol.svg"
+LOGO_FULL = ASSETS_DIR / "graftio_planet.svg"
 
 st.set_page_config(
     page_title="Генрих",
