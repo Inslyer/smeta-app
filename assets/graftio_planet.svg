@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" overflow="hidden">
+  <defs>
+    <linearGradient id="ring" x1="0%" y1="50%" x2="100%" y2="50%" gradientTransform="rotate(20 100 100)">
+      <stop offset="0%" stop-color="#2EA82E"/>
+      <stop offset="50%" stop-color="#A8DC1A"/>
+      <stop offset="100%" stop-color="#F4E821"/>
+    </linearGradient>
+    <mask id="ringMask">
+      <rect x="0" y="0" width="200" height="200" fill="white"/>
+      <!-- разрывы кольца сверху-справа и снизу-слева -->
+      <circle cx="155" cy="45" r="34" fill="black"/>
+      <circle cx="45" cy="155" r="34" fill="black"/>
+    </mask>
+  </defs>
+  <!-- разорванное угольное кольцо -->
+  <g mask="url(#ringMask)">
+    <circle cx="100" cy="100" r="84" fill="none" stroke="#2D2D2D" stroke-width="22"/>
+  </g>
+  <!-- диагональная зелёно-жёлтая полоса (Сатурн) -->
+  <g transform="rotate(-22 100 100)">
+    <ellipse cx="100" cy="100" rx="92" ry="14" fill="url(#ring)"/>
+  </g>
+</svg>

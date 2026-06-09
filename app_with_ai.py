@@ -59,101 +59,168 @@ except Exception as _e:
 db.init_db()
 
 ASSETS_DIR = Path(__file__).resolve().parent / "assets"
-LOGO_MARK = ASSETS_DIR / "graftio_mark.svg"
+LOGO_MARK = ASSETS_DIR / "graftio_planet.svg"
 
 st.set_page_config(
-    page_title="Генрих — Сводная смета · ГРАФТИО",
-    page_icon=str(LOGO_MARK) if LOGO_MARK.exists() else "📋",
+    page_title="Генрих",
+    page_icon=str(LOGO_MARK) if LOGO_MARK.exists() else "🪐",
     layout="wide",
 )
 
-# ----------- Фирменный CSS Графтио --------------------------------
+# ----------- Фирменный CSS Графтио (тёмная тема) --------------------
 st.markdown(
     """
 <style>
-/* Загружаем Inter — современный sans-serif, ближе по духу к презентациям ГРАФТИО */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
 html, body, [class*="css"], [data-testid="stMarkdownContainer"] {
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 }
 
-/* Шапка: фирменная зелёная полоска под заголовком */
+/* Чёрный фон всему приложению */
+.stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {
+    background-color: #0E0E0E;
+    color: #F2F2F2;
+}
+
 [data-testid="stHeader"] { background: transparent; }
 
-div[data-testid="stMain"] > div:first-child > div:first-child > h1 {
-    border-bottom: 4px solid #B1EC52;
-    padding-bottom: 0.4em;
-    margin-bottom: 0.6em;
-    color: #2D2D2D;
-    letter-spacing: -0.5px;
+/* Заголовки и текст — белые */
+h1, h2, h3, h4, h5, h6,
+[data-testid="stMarkdownContainer"], [data-testid="stMarkdownContainer"] * ,
+.stMarkdown, .stMarkdown p, .stMarkdown li, .stMarkdown span {
+    color: #F2F2F2;
+}
+[data-testid="stCaptionContainer"], small, .stCaption {
+    color: #A0A0A0 !important;
 }
 
-/* Primary кнопки в насыщенный зелёный с тёмным текстом */
+/* Primary кнопки — лайм-зелёный градиент с чёрным текстом */
 .stButton > button[kind="primary"] {
-    background: linear-gradient(135deg, #7BBE2F 0%, #B1EC52 100%);
-    color: #1A1A1A;
+    background: linear-gradient(135deg, #7BBE2F 0%, #A8DC1A 50%, #F4E821 100%);
+    color: #0E0E0E;
     border: none;
-    font-weight: 600;
+    font-weight: 700;
+    box-shadow: 0 2px 8px rgba(168,220,26,0.25);
 }
 .stButton > button[kind="primary"]:hover {
-    background: linear-gradient(135deg, #6FA82A 0%, #A3DC4A 100%);
-    color: #1A1A1A;
+    background: linear-gradient(135deg, #6FA82A 0%, #9CCC18 50%, #E8DD20 100%);
+    color: #0E0E0E;
+    box-shadow: 0 3px 12px rgba(168,220,26,0.4);
 }
 
-/* Sidebar — мягкий зелёный оттенок (через secondaryBackgroundColor)
-   и аккуратный отступ от лого */
+/* Обычные кнопки — тёмные с тонкой обводкой */
+.stButton > button:not([kind="primary"]) {
+    background: #1A1A1A;
+    color: #F2F2F2;
+    border: 1px solid #333;
+}
+.stButton > button:not([kind="primary"]):hover {
+    background: #232323;
+    border-color: #A8DC1A;
+    color: #F2F2F2;
+}
+
+/* Sidebar */
 [data-testid="stSidebar"] {
-    border-right: 1px solid #E0E0E0;
+    background-color: #131313 !important;
+    border-right: 1px solid #232323;
 }
-[data-testid="stSidebar"] h2,
-[data-testid="stSidebar"] h3 {
-    color: #2D2D2D;
+[data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3, [data-testid="stSidebar"] h4 {
+    color: #F2F2F2;
 }
 
-/* Tabs — фирменный подсвет активной вкладки */
+/* Tabs */
 .stTabs [data-baseweb="tab-list"] {
     gap: 4px;
+    border-bottom: 1px solid #232323;
 }
 .stTabs [data-baseweb="tab"] {
-    padding: 8px 18px;
+    padding: 10px 20px;
     border-radius: 8px 8px 0 0;
+    color: #A0A0A0;
+    background: transparent;
 }
 .stTabs [aria-selected="true"] {
-    background: linear-gradient(180deg, #F4F8EE 0%, #FFFFFF 100%);
-    border-bottom: 3px solid #7BBE2F !important;
+    background: #1A1A1A;
+    color: #F2F2F2 !important;
+    border-bottom: 3px solid #A8DC1A !important;
 }
 
-/* Metric cards — лёгкая зелёная окантовка */
+/* Метрики */
 [data-testid="stMetric"] {
-    background: #F4F8EE;
-    padding: 12px 16px;
+    background: #1A1A1A;
+    padding: 14px 18px;
     border-radius: 10px;
-    border-left: 3px solid #7BBE2F;
+    border-left: 3px solid #A8DC1A;
+}
+[data-testid="stMetricLabel"] { color: #A0A0A0 !important; }
+[data-testid="stMetricValue"] { color: #F2F2F2 !important; }
+
+/* Поля ввода и selectbox */
+.stTextInput input, .stTextArea textarea, .stNumberInput input,
+[data-baseweb="select"] > div {
+    background-color: #1A1A1A !important;
+    color: #F2F2F2 !important;
+    border-color: #333 !important;
 }
 
-/* Success/info/warning — без перебивания, но с фирменным акцентом */
-[data-testid="stAlert"][role="alert"] {
+/* DataFrame */
+[data-testid="stDataFrame"] {
+    background: #1A1A1A;
     border-radius: 8px;
 }
 
-/* Заголовок страницы — место для логотипа */
+/* Expanders */
+[data-testid="stExpander"] {
+    background: #1A1A1A;
+    border: 1px solid #232323;
+    border-radius: 8px;
+}
+[data-testid="stExpander"] summary { color: #F2F2F2; }
+
+/* File uploader */
+[data-testid="stFileUploader"] section {
+    background: #1A1A1A;
+    border: 2px dashed #333;
+    border-radius: 10px;
+}
+[data-testid="stFileUploader"] section:hover {
+    border-color: #A8DC1A;
+}
+
+/* Alerts (info/success/warning/error) */
+[data-testid="stAlert"] { border-radius: 8px; }
+
+/* Divider */
+hr { border-color: #232323; }
+
+/* Шапка страницы — место для логотипа */
 .graftio-header {
     display: flex;
     align-items: center;
-    gap: 16px;
-    margin-bottom: 8px;
+    gap: 18px;
+    margin-bottom: 6px;
+    padding-bottom: 12px;
+    border-bottom: 2px solid #A8DC1A;
 }
-.graftio-header .mark { width: 48px; height: 48px; flex-shrink: 0; }
-.graftio-header h1 { margin: 0 !important; border: none !important; padding: 0 !important; }
+.graftio-header .mark { width: 56px; height: 56px; flex-shrink: 0; }
+.graftio-header h1 {
+    margin: 0 !important;
+    padding: 0 !important;
+    color: #F2F2F2 !important;
+    font-weight: 800;
+    letter-spacing: -0.5px;
+    font-size: 2.4rem;
+}
 .graftio-tagline {
-    color: #5A5A5A;
+    color: #A0A0A0;
     font-size: 0.9em;
-    margin-top: -8px;
+    margin-top: 6px;
     margin-bottom: 24px;
     font-weight: 500;
 }
-.graftio-tagline .accent { color: #7BBE2F; font-weight: 700; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -166,16 +233,14 @@ if LOGO_MARK.exists():
         f"""
 <div class="graftio-header">
     <div class="mark">{logo_svg}</div>
-    <h1>Сводная смета</h1>
+    <h1>Генрих</h1>
 </div>
-<div class="graftio-tagline">
-    автоматизация закупки · <span class="accent">Генрих</span> · ГРАФТИО
-</div>
+<div class="graftio-tagline">Сводная смета — автоматизация закупки</div>
 """,
         unsafe_allow_html=True,
     )
 else:
-    st.title("Сводная смета — автоматизация закупки")
+    st.title("Генрих")
 
 if not os.getenv("ANTHROPIC_API_KEY"):
     st.error(
@@ -223,12 +288,9 @@ with st.sidebar:
         logo_svg_sidebar = LOGO_MARK.read_text(encoding="utf-8")
         st.markdown(
             f"""
-<div style="display:flex; align-items:center; gap:12px; margin-bottom:8px;">
-    <div style="width:36px;height:36px;">{logo_svg_sidebar}</div>
-    <div>
-        <div style="font-weight:700; font-size:1.05em; color:#2D2D2D;">Генрих</div>
-        <div style="font-size:0.78em; color:#5A5A5A;">от ГРАФТИО</div>
-    </div>
+<div style="display:flex; align-items:center; gap:12px; margin-bottom:12px;">
+    <div style="width:40px;height:40px;">{logo_svg_sidebar}</div>
+    <div style="font-weight:800; font-size:1.3em; color:#F2F2F2; letter-spacing:-0.5px;">Генрих</div>
 </div>
 """,
             unsafe_allow_html=True,

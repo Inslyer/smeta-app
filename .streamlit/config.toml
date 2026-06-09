@@ -1,9 +1,10 @@
 [theme]
-# Фирменная палитра ГРАФТИО — извлечена из логотипа и презентации 2026
-primaryColor = "#7BBE2F"              # насыщенный зелёный (кнопки, акценты)
-backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F4F8EE"  # off-white с лёгким лаймовым оттенком (sidebar, expander)
-textColor = "#2D2D2D"                 # угольный (как в логотипе)
+base = "dark"
+# Фирменная палитра ГРАФТИО — тёмная тема
+primaryColor = "#A8DC1A"              # лайм-зелёный из «кольца» логотипа
+backgroundColor = "#0E0E0E"           # глубокий чёрный фон
+secondaryBackgroundColor = "#1A1A1A"  # чуть светлее (sidebar, expander, metric)
+textColor = "#F2F2F2"                 # почти белый
 font = "sans serif"
 
 [server]
