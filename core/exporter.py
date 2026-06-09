@@ -17,7 +17,9 @@ import re
 from datetime import date
 from typing import Optional
 
-from openpyxl import Workbook
+from copy import copy
+
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
@@ -515,11 +517,23 @@ SUMMARY_SHEET = "'Сводная смета'"
 
 
 def _build_analytics_sheet(ws: Worksheet, client: Estimate, contractor: Estimate,
-                            matches: list[Match], summary_state: dict):
+                            matches: list[Match], summary_state: dict,
+                            material_matches: Optional[list[MaterialMatch]] = None,
+                            supplier_rows: Optional[list[dict]] = None):
     ws.title = "Аналитика"
     for col, w in enumerate([42, 22, 22, 18, 14, 26], start=1):
         ws.column_dimensions[_L(col)].width = w
     ws.freeze_panes = "A2"
+
+    # Карта: client_idx материала -> позиция счёта (только с уверенностью >= 0.4)
+    supplier_by_client_idx: dict[int, dict] = {}
+    if material_matches and supplier_rows:
+        by_id = {r["id"]: r for r in supplier_rows}
+        for mm in material_matches:
+            if mm.invoice_item_id is not None and mm.confidence >= 0.4:
+                r = by_id.get(mm.invoice_item_id)
+                if r:
+                    supplier_by_client_idx[mm.client_idx] = r
 
     work_subs = summary_state.get("work_section_subtotals", {})
     mat_subs = summary_state.get("material_section_subtotals", {})
@@ -679,46 +693,104 @@ def _build_analytics_sheet(ws: Worksheet, client: Estimate, contractor: Estimate
     ws.cell(row=row, column=1,
             value="📦 Материалы по категориям").font = Font(bold=True, size=12)
     row += 1
-    headers = ["Категория", "Клиент (без НДС)", "Закупка (без НДС)",
-               "Маржа, руб.", "Маржа, %", "Статус"]
+    ws.cell(row=row, column=1, value=(
+        "Считается отдельно «всего у Заказчика» и «покрыто закупкой». "
+        "Маржа % считается только по покрытой части, чтобы не искажать "
+        "картину пустыми позициями.")).font = Font(italic=True, color="666666")
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=6)
+    row += 1
+    headers = ["Категория", "Заказчик всего (без НДС)",
+                "Заказчик покрыто (без НДС)", "Закупка (без НДС)",
+                "Маржа покрытой, %", "Покрытие, %"]
+    # расширим столбцы под новые заголовки
+    for col, w in [(1, 30), (2, 22), (3, 24), (4, 20), (5, 18), (6, 16)]:
+        ws.column_dimensions[_L(col)].width = w
     for col, h in enumerate(headers, start=1):
         c = ws.cell(row=row, column=col, value=h)
         c.font = HEADER_FONT
         c.fill = HEADER_FILL
         c.border = BORDER_THIN
+        c.alignment = Alignment(horizontal="center", vertical="center",
+                                  wrap_text=True)
+    ws.row_dimensions[row].height = 32
     row += 1
 
-    # агрегаты по категориям (без НДС, на клиенте)
-    cat_totals: dict[str, float] = {}
-    cat_counts: dict[str, int] = {}
-    for it in client.items:
+    # агрегаты по категориям (без НДС, на стороне Заказчика)
+    cat_total_client: dict[str, float] = {}
+    cat_covered_client: dict[str, float] = {}
+    cat_purchase: dict[str, float] = {}
+    cat_total_count: dict[str, int] = {}
+    cat_covered_count: dict[str, int] = {}
+
+    for c_idx, it in enumerate(client.items):
         if it.price_material is None and it.sum_material is None:
             continue
         sum_mat_gross = it.sum_material if it.sum_material is not None \
             else (it.price_material or 0) * (it.quantity or 0)
         sum_mat_net = sum_mat_gross / (1 + VAT_RATE)
         category = classify_material(it.name)
-        cat_totals[category] = cat_totals.get(category, 0.0) + sum_mat_net
-        cat_counts[category] = cat_counts.get(category, 0) + 1
+
+        cat_total_client[category] = cat_total_client.get(category, 0.0) + sum_mat_net
+        cat_total_count[category] = cat_total_count.get(category, 0) + 1
+
+        sup_row = supplier_by_client_idx.get(c_idx)
+        if sup_row is not None and sup_row.get("unit_price") is not None:
+            raw = float(sup_row["unit_price"])
+            if sup_row.get("vat_included"):
+                vat_r = sup_row.get("vat_rate") or VAT_RATE
+                purchase_unit_net = raw / (1 + vat_r)
+            else:
+                purchase_unit_net = raw
+            qty = it.quantity or 0
+            purchase_sum = qty * purchase_unit_net
+            cat_purchase[category] = cat_purchase.get(category, 0.0) + purchase_sum
+            cat_covered_client[category] = cat_covered_client.get(category, 0.0) + sum_mat_net
+            cat_covered_count[category] = cat_covered_count.get(category, 0) + 1
 
     mat_first_row = row
     for category in ["Лотки", "Кабель и проводка", "Зарядные станции",
                      "Шкафы и щиты", "Другое"]:
-        if category not in cat_totals:
+        if category not in cat_total_client:
             continue
-        ws.cell(row=row, column=1, value=category)
-        ws.cell(row=row, column=2,
-                value=cat_totals[category]).number_format = "#,##0.00 ₽"
-        ws.cell(row=row, column=3, value=0).number_format = "#,##0.00 ₽"
-        ws.cell(row=row, column=4,
-                value=f"=B{row}-C{row}").number_format = "#,##0.00 ₽"
-        pct = ws.cell(row=row, column=5,
-                       value=f"=IF(B{row}=0,0,D{row}/B{row})")
-        pct.number_format = "0.0%"
-        pct.fill = GREY
-        ws.cell(row=row, column=6,
-                value=f"⚠ Нет цен закупки ({cat_counts[category]} поз.)").font = \
-            Font(italic=True)
+        total_c = cat_total_client[category]
+        covered_c = cat_covered_client.get(category, 0.0)
+        purchase = cat_purchase.get(category, 0.0)
+        total_n = cat_total_count[category]
+        covered_n = cat_covered_count.get(category, 0)
+
+        ws.cell(row=row, column=1, value=f"{category} ({covered_n}/{total_n})")
+        ws.cell(row=row, column=2, value=total_c).number_format = "#,##0.00 ₽"
+        ws.cell(row=row, column=3, value=covered_c).number_format = "#,##0.00 ₽"
+        ws.cell(row=row, column=4, value=purchase).number_format = "#,##0.00 ₽"
+        # Маржа покрытой части в %: (covered_client - purchase) / covered_client
+        margin_pct_cell = ws.cell(
+            row=row, column=5,
+            value=f"=IF(C{row}=0,0,(C{row}-D{row})/C{row})",
+        )
+        margin_pct_cell.number_format = "0.0%"
+        # Покрытие, % = covered_client / total_client
+        coverage_cell = ws.cell(
+            row=row, column=6,
+            value=f"=IF(B{row}=0,0,C{row}/B{row})",
+        )
+        coverage_cell.number_format = "0.0%"
+
+        # светофор маржи (по python-вычислению)
+        if covered_c:
+            mp = (covered_c - purchase) / covered_c
+            margin_pct_cell.fill = _margin_fill(mp)
+        else:
+            margin_pct_cell.fill = GREY
+        # цвет покрытия
+        if total_c:
+            cov = covered_c / total_c
+            if cov >= 0.95:
+                coverage_cell.fill = GREEN
+            elif cov >= 0.5:
+                coverage_cell.fill = YELLOW
+            else:
+                coverage_cell.fill = RED
+
         for c in range(1, 7):
             ws.cell(row=row, column=c).border = BORDER_THIN
         row += 1
@@ -735,9 +807,11 @@ def _build_analytics_sheet(ws: Worksheet, client: Estimate, contractor: Estimate
         ws.cell(row=row, column=3,
                 value=f"=SUM(C{mat_first_row}:C{last})").number_format = "#,##0.00 ₽"
         ws.cell(row=row, column=4,
-                value=f"=B{row}-C{row}").number_format = "#,##0.00 ₽"
+                value=f"=SUM(D{mat_first_row}:D{last})").number_format = "#,##0.00 ₽"
         ws.cell(row=row, column=5,
-                value=f"=IF(B{row}=0,0,D{row}/B{row})").number_format = "0.0%"
+                value=f"=IF(C{row}=0,0,(C{row}-D{row})/C{row})").number_format = "0.0%"
+        ws.cell(row=row, column=6,
+                value=f"=IF(B{row}=0,0,C{row}/B{row})").number_format = "0.0%"
 
 
 # ---------------------------------------------------------- Исходники с итогами
@@ -838,16 +912,147 @@ def _build_raw_sheet(ws: Worksheet, estimate: Estimate, title: str):
             ws.cell(row=row, column=col, value=f"={parts}").number_format = "#,##0.00"
 
 
+# ---------------------------------------------------------- Копирование внешнего xlsx
+def _safe_sheet_title(wb: Workbook, raw: str) -> str:
+    """Excel ограничивает имя листа 31 символом и запрещает : \\ / ? * [ ]."""
+    cleaned = re.sub(r"[:\\/\?\*\[\]]", "-", raw)[:31]
+    base = cleaned
+    counter = 2
+    while cleaned in wb.sheetnames:
+        suffix = f" ({counter})"
+        cleaned = (base[: 31 - len(suffix)] + suffix)
+        counter += 1
+    return cleaned
+
+
+def _copy_external_sheets(src_bytes: bytes, dst_wb: Workbook,
+                           title_prefix: str) -> None:
+    """Копирует все листы из внешнего xlsx в dst_wb как-есть.
+
+    Сохраняет значения, формулы, базовое форматирование (font, fill,
+    alignment, border, number_format), ширины колонок, высоты строк,
+    объединения. Картинки/чарты не переносятся (openpyxl их обычно
+    теряет при load_workbook все равно)."""
+    src_buf = io.BytesIO(src_bytes)
+    src_wb = load_workbook(src_buf, data_only=False)
+    for sheet_name in src_wb.sheetnames:
+        src_ws = src_wb[sheet_name]
+        title = _safe_sheet_title(dst_wb, f"{title_prefix}: {sheet_name}")
+        dst_ws = dst_wb.create_sheet(title=title)
+
+        # Ячейки
+        for row in src_ws.iter_rows():
+            for cell in row:
+                new_cell = dst_ws.cell(
+                    row=cell.row, column=cell.column, value=cell.value,
+                )
+                if cell.has_style:
+                    new_cell.font = copy(cell.font)
+                    new_cell.fill = copy(cell.fill)
+                    new_cell.alignment = copy(cell.alignment)
+                    new_cell.border = copy(cell.border)
+                    new_cell.number_format = cell.number_format
+                    new_cell.protection = copy(cell.protection)
+        # Ширины колонок
+        for col_letter, col_dim in src_ws.column_dimensions.items():
+            if col_dim.width is not None:
+                dst_ws.column_dimensions[col_letter].width = col_dim.width
+            if col_dim.hidden:
+                dst_ws.column_dimensions[col_letter].hidden = True
+        # Высоты строк
+        for row_num, row_dim in src_ws.row_dimensions.items():
+            if row_dim.height is not None:
+                dst_ws.row_dimensions[row_num].height = row_dim.height
+        # Слияния
+        for mr in src_ws.merged_cells.ranges:
+            try:
+                dst_ws.merge_cells(str(mr))
+            except Exception:
+                pass
+        # Заморозка панелей
+        if src_ws.freeze_panes:
+            dst_ws.freeze_panes = src_ws.freeze_panes
+
+
+# ---------------------------------------------------------- Лист счёта поставщика
+def _build_invoice_sheet(ws: Worksheet, invoice_meta: dict,
+                          items: list[dict]) -> None:
+    """Один лист = один счёт поставщика. Шапка + таблица позиций."""
+    # Шапка
+    ws.cell(row=1, column=1,
+            value=f"Поставщик: {invoice_meta.get('supplier_name', '—')}").font = \
+        Font(bold=True, size=12)
+    ws.cell(row=2, column=1,
+            value=(f"Счёт №{invoice_meta.get('invoice_number') or '—'} от "
+                    f"{invoice_meta.get('invoice_date') or '—'}")).font = Font(bold=True)
+    if invoice_meta.get("total_with_vat") is not None:
+        ws.cell(row=3, column=1,
+                value=(f"Итого с НДС: {invoice_meta['total_with_vat']:,.2f} ₽"
+                        ).replace(",", " "))
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=10)
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=10)
+    ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=10)
+
+    # Заголовки таблицы
+    headers = ["№ п/п", "Артикул поставщика", "Артикул производителя",
+                "Наименование", "Ед.", "Кол-во", "Цена за ед.",
+                "НДС %", "Сумма (кол-во × цена)", "С НДС в цене?"]
+    widths = [7, 18, 22, 60, 8, 10, 14, 8, 18, 14]
+    for i, (h, w) in enumerate(zip(headers, widths), start=1):
+        c = ws.cell(row=5, column=i, value=h)
+        c.font = HEADER_FONT
+        c.fill = HEADER_FILL
+        c.border = BORDER_THIN
+        c.alignment = Alignment(horizontal="center", vertical="center",
+                                  wrap_text=True)
+        ws.column_dimensions[_L(i)].width = w
+    ws.row_dimensions[5].height = 32
+    ws.freeze_panes = "A6"
+
+    row = 6
+    for it in items:
+        ws.cell(row=row, column=1, value=it.get("line_no"))
+        ws.cell(row=row, column=2, value=it.get("article_supplier"))
+        ws.cell(row=row, column=3, value=it.get("article_manufacturer"))
+        ws.cell(row=row, column=4, value=it.get("name")).alignment = \
+            Alignment(wrap_text=True, vertical="top")
+        ws.cell(row=row, column=5, value=it.get("unit"))
+        ws.cell(row=row, column=6,
+                value=it.get("quantity")).number_format = "#,##0.00"
+        ws.cell(row=row, column=7,
+                value=it.get("unit_price")).number_format = "#,##0.00 ₽"
+        vat = it.get("vat_rate")
+        if vat is not None:
+            ws.cell(row=row, column=8, value=vat).number_format = "0%"
+        ws.cell(row=row, column=9,
+                value=f"=F{row}*G{row}").number_format = "#,##0.00 ₽"
+        ws.cell(row=row, column=10,
+                value="да" if it.get("vat_included") else "нет")
+        for c in range(1, 11):
+            ws.cell(row=row, column=c).border = BORDER_THIN
+        row += 1
+
+
 # ---------------------------------------------------------- Сборка
 def build_workbook(client: Estimate, contractor: Estimate,
                     matches: list[Match],
                     material_matches: Optional[list[MaterialMatch]] = None,
-                    supplier_rows: Optional[list[dict]] = None) -> io.BytesIO:
-    """Собирает Excel со сводной сметой.
+                    supplier_rows: Optional[list[dict]] = None,
+                    client_xlsx_bytes: Optional[bytes] = None,
+                    contractor_xlsx_bytes: Optional[bytes] = None,
+                    invoices_with_items: Optional[list[tuple[dict, list[dict]]]]
+                        = None) -> io.BytesIO:
+    """Собирает итоговый Excel.
 
-    material_matches + supplier_rows — опционально. Если переданы, в строках
-    материалов будут проставлены цена закупки, поставщик и № счёта, а маржа
-    по материалам посчитается формулами.
+    Параметры:
+        client, contractor: распарсенные сметы.
+        matches, material_matches, supplier_rows: результаты AI-сопоставления.
+        client_xlsx_bytes / contractor_xlsx_bytes: исходные файлы Excel сметы
+            Заказчика / подрядчика. Если переданы — вставляются КАК ЕСТЬ
+            отдельными вкладками (без редактирования).
+        invoices_with_items: список (invoice_meta_dict, [item_dict, ...])
+            для каждого счёта поставщика по проекту — каждый идёт отдельной
+            вкладкой с таблицей позиций.
     """
     wb = Workbook()
     summary_state = _build_summary_sheet(
@@ -855,9 +1060,41 @@ def build_workbook(client: Estimate, contractor: Estimate,
         material_matches=material_matches,
         supplier_rows=supplier_rows,
     )
-    _build_analytics_sheet(wb.create_sheet(), client, contractor, matches, summary_state)
-    _build_raw_sheet(wb.create_sheet(), client, "Исходник клиента")
-    _build_raw_sheet(wb.create_sheet(), contractor, "Исходник подрядчика")
+    _build_analytics_sheet(
+        wb.create_sheet(), client, contractor, matches, summary_state,
+        material_matches=material_matches, supplier_rows=supplier_rows,
+    )
+
+    # Исходники как-есть
+    if client_xlsx_bytes:
+        try:
+            _copy_external_sheets(client_xlsx_bytes, wb,
+                                    "Исходник Заказчика")
+        except Exception:
+            # Если внешний файл нечитаемый — fallback на старую логику
+            _build_raw_sheet(wb.create_sheet(), client, "Исходник Заказчика")
+    else:
+        _build_raw_sheet(wb.create_sheet(), client, "Исходник Заказчика")
+
+    if contractor_xlsx_bytes:
+        try:
+            _copy_external_sheets(contractor_xlsx_bytes, wb,
+                                    "Исходник подрядчика")
+        except Exception:
+            _build_raw_sheet(wb.create_sheet(), contractor,
+                              "Исходник подрядчика")
+    else:
+        _build_raw_sheet(wb.create_sheet(), contractor, "Исходник подрядчика")
+
+    # Вкладки счетов поставщиков
+    if invoices_with_items:
+        for inv_meta, inv_items in invoices_with_items:
+            sup = (inv_meta.get("supplier_name") or "Поставщик")[:15]
+            num = (inv_meta.get("invoice_number") or "—")[:10]
+            title = _safe_sheet_title(wb, f"Счёт {sup} №{num}")
+            ws = wb.create_sheet(title=title)
+            _build_invoice_sheet(ws, inv_meta, inv_items)
+
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)

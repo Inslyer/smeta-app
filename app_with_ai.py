@@ -59,7 +59,8 @@ st.title("📋 Сводная смета — автоматизация заку
 if not os.getenv("ANTHROPIC_API_KEY"):
     st.error(
         "Не найден ANTHROPIC_API_KEY. Создайте файл `.env` рядом с `app.py` "
-        "и пропишите туда ключ от Claude API. См. `.env.example`."
+        "и пропишите туда ключ Anthropic API (его использует Генрих). "
+        "См. `.env.example`."
     )
     st.stop()
 
@@ -146,8 +147,8 @@ with tab_upload:
     col1, col2 = st.columns(2)
 
     with col1:
-        st.subheader("Смета клиента")
-        st.caption("Excel со сметой, которую вы выставляете заказчику.")
+        st.subheader("Смета Заказчика")
+        st.caption("Excel со сметой, которую вы выставляете Заказчику.")
         client_file = st.file_uploader(
             "Перетащите файл сюда",
             type=["xlsx", "xls"],
@@ -170,20 +171,24 @@ with tab_upload:
             client_path = _save_upload(client_file)
             client_estimate = parse_client_estimate(client_path)
             st.session_state["client_estimate"] = client_estimate
+            st.session_state["client_xlsx_bytes"] = bytes(client_file.getbuffer())
+            st.session_state["client_xlsx_name"] = client_file.name
             st.success(
-                f"✅ Смета клиента: **{len(client_estimate.items)}** позиций, "
+                f"✅ Смета Заказчика: **{len(client_estimate.items)}** позиций, "
                 f"итого **{client_estimate.total:,.2f} ₽** с НДС".replace(",", " ")
             )
-            with st.expander("Подробно — позиции сметы клиента"):
+            with st.expander("Подробно — позиции сметы Заказчика"):
                 st.dataframe(_items_to_df(client_estimate), width="stretch", hide_index=True)
         except Exception as e:
-            st.error(f"Не удалось распарсить смету клиента: {e}")
+            st.error(f"Не удалось распарсить смету Заказчика: {e}")
 
     if contractor_file:
         try:
             contractor_path = _save_upload(contractor_file)
             contractor_estimate = parse_contractor_estimate(contractor_path)
             st.session_state["contractor_estimate"] = contractor_estimate
+            st.session_state["contractor_xlsx_bytes"] = bytes(contractor_file.getbuffer())
+            st.session_state["contractor_xlsx_name"] = contractor_file.name
             total_str = (
                 f"{contractor_estimate.total:,.2f} ₽".replace(",", " ")
                 if contractor_estimate.total else "не указан"
@@ -202,20 +207,20 @@ with tab_summary:
     contractor = st.session_state.get("contractor_estimate")
 
     if not client:
-        st.info("Загрузите смету клиента на вкладке «Загрузка смет».")
+        st.info("Загрузите смету Заказчика на вкладке «Загрузка смет».")
     elif not contractor:
         st.info("Загрузите смету подрядчика, чтобы запустить сопоставление работ.")
     else:
         col1, col2, col3 = st.columns(3)
         col1.metric(
-            "Сумма клиента (с НДС)",
+            "Сумма Заказчика (с НДС)",
             f"{client.total:,.0f} ₽".replace(",", " "),
         )
         col2.metric(
             "Подрядчик (без НДС)",
             f"{contractor.total:,.0f} ₽".replace(",", " ") if contractor.total else "—",
         )
-        col3.metric("Позиций клиента / подрядчика", f"{len(client.items)} / {len(contractor.items)}")
+        col3.metric("Позиций Заказчика / подрядчика", f"{len(client.items)} / {len(contractor.items)}")
 
         st.divider()
         st.subheader("🔗 Сопоставление работ — AI")
@@ -223,7 +228,7 @@ with tab_summary:
         action_col, info_col = st.columns([1, 3])
         with action_col:
             if st.button("✨ Сопоставить позиции", type="primary"):
-                with st.spinner("Claude сопоставляет позиции..."):
+                with st.spinner("Генрих сопоставляет позиции..."):
                     try:
                         matches, meta = match_estimates(client, contractor)
                         st.session_state["matches"] = matches
@@ -268,11 +273,11 @@ with tab_summary:
                     badge = "⚪️"
                 rows.append({
                     "Уверен.": f"{badge} {m.confidence:.0%}",
-                    "Раздел клиента": c_item.section,
-                    "Позиция клиента": c_item.name,
+                    "Раздел Заказчика": c_item.section,
+                    "Позиция Заказчика": c_item.name,
                     "Ед.": c_item.unit,
                     "Кол-во": c_item.quantity,
-                    "Цена работы клиента": c_item.price_work,
+                    "Цена работы Заказчика": c_item.price_work,
                     "Соответствие у подрядчика":
                         p_item.name if p_item else "— нет —",
                     "Цена подрядчика": p_item.price_work if p_item else None,
@@ -299,7 +304,7 @@ with tab_summary:
             st.divider()
             st.subheader("🧾 Цены закупки материалов — из счетов поставщиков")
             st.caption(
-                "Выберите проект — Claude сопоставит материалы из сметы клиента "
+                "Выберите проект — Генрих сопоставит материалы из сметы Заказчика "
                 "с позициями загруженных счетов и подставит цены закупки."
             )
 
@@ -341,7 +346,7 @@ with tab_summary:
                             if st.button("🧮 Подобрать цены закупки",
                                           type="primary",
                                           key="run_match_materials"):
-                                with st.spinner("Claude сопоставляет материалы..."):
+                                with st.spinner("Генрих сопоставляет материалы..."):
                                     try:
                                         m_matches, m_meta = match_materials(
                                             client, supplier_rows,
@@ -388,10 +393,10 @@ with tab_summary:
                             mat_rows.append({
                                 "Уверен.": f"{badge} {mm.confidence:.0%}",
                                 "Тип": kind_badge,
-                                "Раздел клиента": c_item.section,
-                                "Материал клиента": c_item.name,
-                                "Кол-во клиента": f"{c_item.quantity} {c_item.unit}",
-                                "Цена клиента (мат.)": c_item.price_material,
+                                "Раздел Заказчика": c_item.section,
+                                "Материал Заказчика": c_item.name,
+                                "Кол-во Заказчика": f"{c_item.quantity} {c_item.unit}",
+                                "Цена Заказчика (мат.)": c_item.price_material,
                                 "Позиция в счёте": s_row["name"] if s_row else "— нет —",
                                 "Артикул": (s_row.get("article_supplier")
                                               or s_row.get("article_manufacturer"))
@@ -425,11 +430,28 @@ with tab_summary:
                 "Excel-файл с 4 листами: «Сводная смета» (с маржой и светофором), "
                 "«Аналитика», и исходники обеих смет для аудита."
             )
+            # Собираем список счетов для отдельных вкладок (если выбран проект
+            # на этой же вкладке сводной сметы)
+            invoices_with_items: list[tuple[dict, list[dict]]] = []
+            mat_proj_id = None
+            mat_proj_name = st.session_state.get("materials_project_sel")
+            if mat_proj_name and mat_proj_name != "— выбрать проект —":
+                _proj = db.get_project_by_name(mat_proj_name)
+                if _proj:
+                    mat_proj_id = _proj["id"]
+            if mat_proj_id:
+                for inv in db.list_invoices(project_id=mat_proj_id):
+                    inv_items = db.list_invoice_items(inv["id"])
+                    invoices_with_items.append((dict(inv), inv_items))
+
             try:
                 xlsx_bytes = build_workbook(
                     client, contractor, matches,
                     material_matches=st.session_state.get("mat_matches"),
                     supplier_rows=st.session_state.get("mat_supplier_rows"),
+                    client_xlsx_bytes=st.session_state.get("client_xlsx_bytes"),
+                    contractor_xlsx_bytes=st.session_state.get("contractor_xlsx_bytes"),
+                    invoices_with_items=invoices_with_items or None,
                 )
                 st.download_button(
                     label="💾 Скачать Excel со сводной сметой",
@@ -441,7 +463,7 @@ with tab_summary:
             except Exception as e:
                 st.error(f"Не удалось собрать Excel: {e}")
         else:
-            st.info("Нажмите «Сопоставить позиции», чтобы Claude построил пары.")
+            st.info("Нажмите «Сопоставить позиции», чтобы Генрих построил пары.")
 
 
 # =====================================================================
@@ -468,7 +490,7 @@ def _invoice_items_to_df(invoice: SupplierInvoice) -> pd.DataFrame:
 with tab_invoices:
     st.subheader("📦 Счета поставщиков по проектам")
     st.caption(
-        "Закупщик загружает счёт от поставщика — Claude парсит позиции, "
+        "Закупщик загружает счёт от поставщика — Генрих парсит позиции, "
         "вы подтверждаете, и цены сохраняются в базе для подстановки в сводную смету."
     )
 
@@ -519,93 +541,133 @@ with tab_invoices:
         with col_s:
             supplier_options = {s["name"]: s["id"] for s in suppliers_material}
             chosen_supplier = st.selectbox(
-                "Поставщик",
+                "Поставщик (для всех загружаемых счетов)",
                 list(supplier_options.keys()),
                 key="invoice_supplier_sel",
             )
             supplier_id = supplier_options[chosen_supplier]
         with col_f:
-            invoice_file = st.file_uploader(
-                "Файл счёта (PDF или Excel)",
+            invoice_files = st.file_uploader(
+                "Файлы счетов (можно несколько — PDF или Excel)",
                 type=["pdf", "xlsx", "xls"],
                 key="invoice_uploader",
+                accept_multiple_files=True,
             )
 
-        if invoice_file is not None:
-            cache_key = f"parsed_invoice::{invoice_file.name}::{invoice_file.size}"
-            parsed: SupplierInvoice | None = st.session_state.get(cache_key)
+        if invoice_files:
+            st.caption(
+                f"Файлов в очереди: **{len(invoice_files)}**. "
+                "Генрих читает каждый по очереди и кэширует результат."
+            )
 
-            if parsed is None:
-                with st.spinner("Claude читает счёт..."):
-                    try:
-                        tmp_path = _save_upload(invoice_file)
-                        parsed = parse_invoice(tmp_path)
-                        st.session_state[cache_key] = parsed
-                    except Exception as e:
-                        st.error(f"Не удалось распарсить счёт: {e}")
-                        parsed = None
+            parsed_list: list[tuple[str, SupplierInvoice | None, str | None]] = []
+            for f in invoice_files:
+                cache_key = f"parsed_invoice::{f.name}::{f.size}"
+                parsed_one: SupplierInvoice | None = st.session_state.get(cache_key)
+                err = None
+                if parsed_one is None:
+                    with st.spinner(f"Генрих читает «{f.name}»..."):
+                        try:
+                            tmp_path = _save_upload(f)
+                            parsed_one = parse_invoice(tmp_path)
+                            st.session_state[cache_key] = parsed_one
+                        except Exception as e:
+                            err = str(e)
+                            parsed_one = None
+                parsed_list.append((cache_key, parsed_one, err))
 
-            if parsed is not None:
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Поставщик", parsed.supplier_name[:24])
-                c2.metric("Счёт", parsed.invoice_number or "—")
-                c3.metric("Дата", parsed.invoice_date or "—")
-                total_disp = (
-                    f"{parsed.total_with_vat:,.0f} ₽".replace(",", " ")
-                    if parsed.total_with_vat else "—"
+            # Превью всех распарсенных
+            for cache_key, parsed_one, err in parsed_list:
+                f_name = cache_key.split("::")[1]
+                if err:
+                    st.error(f"❌ {f_name}: {err}")
+                    continue
+                if parsed_one is None:
+                    continue
+                header = (
+                    f"📄 **{f_name}** · {parsed_one.supplier_name[:24]} · "
+                    f"счёт №{parsed_one.invoice_number or '—'} от "
+                    f"{parsed_one.invoice_date or '—'} · "
+                    f"{len(parsed_one.items)} поз."
                 )
-                c4.metric("Итого с НДС", total_disp)
-
-                if parsed.project_tag:
-                    st.caption(
-                        f"ℹ️ В счёте указано примечание / тег: «{parsed.project_tag}» "
-                        f"(носит справочный характер — привязка к проекту делается "
-                        f"вашим выбором выше)."
+                with st.expander(header):
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Поставщик", parsed_one.supplier_name[:24])
+                    c2.metric("Счёт", parsed_one.invoice_number or "—")
+                    c3.metric("Дата", parsed_one.invoice_date or "—")
+                    total_disp = (
+                        f"{parsed_one.total_with_vat:,.0f} ₽".replace(",", " ")
+                        if parsed_one.total_with_vat else "—"
+                    )
+                    c4.metric("Итого с НДС", total_disp)
+                    if parsed_one.project_tag:
+                        st.caption(
+                            f"ℹ️ В счёте указано примечание / тег: "
+                            f"«{parsed_one.project_tag}» (справочно)."
+                        )
+                    st.dataframe(
+                        _invoice_items_to_df(parsed_one),
+                        width="stretch",
+                        hide_index=True,
                     )
 
-                st.markdown(f"**Позиции ({len(parsed.items)}):**")
-                st.dataframe(
-                    _invoice_items_to_df(parsed),
-                    width="stretch",
-                    hide_index=True,
-                )
-
-                save_col, _ = st.columns([1, 4])
-                with save_col:
-                    if st.button("💾 Сохранить счёт", type="primary",
-                                  key=f"save_{cache_key}"):
-                        try:
-                            invoice_id = db.save_invoice(
-                                supplier_id=supplier_id,
-                                project_id=project_id,
-                                invoice_number=parsed.invoice_number,
-                                invoice_date=parsed.invoice_date,
-                                total_without_vat=parsed.total_without_vat,
-                                total_with_vat=parsed.total_with_vat,
-                                source_file=parsed.source_file,
-                                items=[
-                                    {
-                                        "line_no": it.line_no,
-                                        "name": it.name,
-                                        "article_supplier": it.article_supplier,
-                                        "article_manufacturer": it.article_manufacturer,
-                                        "unit": it.unit,
-                                        "quantity": it.quantity,
-                                        "unit_price": it.unit_price,
-                                        "vat_rate": it.vat_rate,
-                                        "vat_included": it.vat_included,
-                                    }
-                                    for it in parsed.items
-                                ],
-                            )
+            ok_parsed = [(k, p) for k, p, e in parsed_list if p is not None and not e]
+            if ok_parsed:
+                col_save, col_clear, _ = st.columns([2, 1, 3])
+                with col_save:
+                    if st.button(
+                        f"💾 Сохранить все ({len(ok_parsed)}) в проект "
+                        f"«{project_name}»",
+                        type="primary",
+                        key="save_all_invoices",
+                    ):
+                        saved, errors = 0, []
+                        for cache_key, parsed_one in ok_parsed:
+                            try:
+                                db.save_invoice(
+                                    supplier_id=supplier_id,
+                                    project_id=project_id,
+                                    invoice_number=parsed_one.invoice_number,
+                                    invoice_date=parsed_one.invoice_date,
+                                    total_without_vat=parsed_one.total_without_vat,
+                                    total_with_vat=parsed_one.total_with_vat,
+                                    source_file=parsed_one.source_file,
+                                    items=[
+                                        {
+                                            "line_no": it.line_no,
+                                            "name": it.name,
+                                            "article_supplier": it.article_supplier,
+                                            "article_manufacturer": it.article_manufacturer,
+                                            "unit": it.unit,
+                                            "quantity": it.quantity,
+                                            "unit_price": it.unit_price,
+                                            "vat_rate": it.vat_rate,
+                                            "vat_included": it.vat_included,
+                                        }
+                                        for it in parsed_one.items
+                                    ],
+                                )
+                                saved += 1
+                                st.session_state.pop(cache_key, None)
+                            except Exception as e:
+                                errors.append(
+                                    f"{cache_key.split('::')[1]}: {e}"
+                                )
+                        if saved:
                             st.success(
-                                f"✅ Счёт сохранён в проект «{project_name}» "
-                                f"(id={invoice_id})."
+                                f"✅ Сохранено счетов: **{saved}** в проект "
+                                f"«{project_name}»."
                             )
-                            st.session_state.pop(cache_key, None)
+                        for er in errors:
+                            st.error(f"❌ {er}")
+                        if saved and not errors:
                             st.rerun()
-                        except Exception as e:
-                            st.error(f"Не удалось сохранить: {e}")
+                with col_clear:
+                    if st.button("🗑 Очистить очередь",
+                                   key="clear_invoices_queue"):
+                        for cache_key, _ in ok_parsed:
+                            st.session_state.pop(cache_key, None)
+                        st.rerun()
 
     st.divider()
 
