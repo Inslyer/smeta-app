@@ -369,6 +369,10 @@ with tab_upload:
         try:
             client_path = _save_upload(client_file)
             client_estimate = parse_client_estimate(client_path)
+            # Подменяем технические tmp-имена на оригинальное имя файла,
+            # чтобы в Excel в колонке «Исполнитель» был человеко-читаемый источник.
+            client_estimate.title = Path(client_file.name).stem
+            client_estimate.file_name = client_file.name
             st.session_state["client_estimate"] = client_estimate
             st.session_state["client_xlsx_bytes"] = bytes(client_file.getbuffer())
             st.session_state["client_xlsx_name"] = client_file.name
@@ -385,6 +389,8 @@ with tab_upload:
         try:
             contractor_path = _save_upload(contractor_file)
             contractor_estimate = parse_contractor_estimate(contractor_path)
+            contractor_estimate.title = Path(contractor_file.name).stem
+            contractor_estimate.file_name = contractor_file.name
             st.session_state["contractor_estimate"] = contractor_estimate
             st.session_state["contractor_xlsx_bytes"] = bytes(contractor_file.getbuffer())
             st.session_state["contractor_xlsx_name"] = contractor_file.name

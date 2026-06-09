@@ -52,12 +52,18 @@ WHITE_BOLD = Font(bold=True, color="FFFFFF")
 
 # ---------------------------------------------------------- Классификация материалов
 CATEGORY_RULES = [
-    ("Лотки", [r"лоток", r"лотка", r"разделитель лотк", r"крышка лотк",
-               r"угол лотк", r"заглушк.*лотк", r"кабельнес"]),
-    ("Кабель и проводка", [r"кабель", r"провод", r"витая пара",
-                            r"коннектор", r"наконечник", r"муфт"]),
+    # ВАЖНО: порядок имеет значение — берётся ПЕРВОЕ совпадение.
+    # «Прокладка кабеля по существующим лоткам» содержит и «кабель» и «лотков» —
+    # такая позиция должна классифицироваться как кабель, а не как лотки.
+    ("Кабель и проводка", [r"кабел", r"провод", r"витая пара",
+                            r"коннектор", r"наконечник", r"муфт",
+                            r"затяжк", r"расключ"]),
     ("Зарядные станции", [r"эзс", r"зарядн", r"пур[\-\s]?эзс", r"щсу[\-\s]?эзс"]),
-    ("Шкафы и щиты", [r"шкаф", r"щит", r"сдупэм", r"щсу", r"корпус"]),
+    ("Шкафы и щиты", [r"шкаф", r"щит\b", r"сдупэм", r"щсу", r"корпус"]),
+    ("Лотки", [r"лоток", r"лотк", r"разделитель", r"крышка лотк",
+               r"угол лотк", r"заглушк.*лотк", r"кабельнес",
+               r"профил.{0,5}psm", r"профил.{0,5}stm", r"профил.{0,5}п-обр",
+               r"шпильк", r"анкер", r"гайк", r"шайб", r"винт"]),
 ]
 
 
@@ -299,10 +305,20 @@ def _write_item_row(
 
 def _section_subtotal_row(ws, row: int, label: str,
                            item_rows: list[int]) -> dict:
-    """Итог по разделу — формулами SUM. Возвращает адреса для аналитики."""
+    """Итог по разделу — формулами SUM. Возвращает адреса для аналитики.
+
+    Маржа в субтотале считается ТОЛЬКО по покрытым строкам:
+    sum_net_covered = SUMIF(purchase_range, ">0", net_range);
+    margin_abs      = sum_net_covered - sum_purchase;
+    margin_pct      = margin_abs / sum_net_covered.
+    Если нет ни одной строки с закупкой — оба поля показывают «—».
+    """
     if not item_rows:
         return {}
     first, last = item_rows[0], item_rows[-1]
+    purchase_rng = f"{_L(SUM_PURCHASE)}{first}:{_L(SUM_PURCHASE)}{last}"
+    net_rng = f"{_L(SUM_NET)}{first}:{_L(SUM_NET)}{last}"
+
     for c in range(1, N + 1):
         ws.cell(row=row, column=c).fill = TOTAL_FILL
         ws.cell(row=row, column=c).font = Font(bold=True)
@@ -314,21 +330,23 @@ def _section_subtotal_row(ws, row: int, label: str,
             value=f"=SUM({_L(SUM_GROSS)}{first}:{_L(SUM_GROSS)}{last})")
     _money_format(ws.cell(row=row, column=SUM_GROSS))
 
-    ws.cell(row=row, column=SUM_NET,
-            value=f"=SUM({_L(SUM_NET)}{first}:{_L(SUM_NET)}{last})")
+    ws.cell(row=row, column=SUM_NET, value=f"=SUM({net_rng})")
     _money_format(ws.cell(row=row, column=SUM_NET))
 
-    ws.cell(row=row, column=SUM_PURCHASE,
-            value=f"=SUM({_L(SUM_PURCHASE)}{first}:{_L(SUM_PURCHASE)}{last})")
+    ws.cell(row=row, column=SUM_PURCHASE, value=f"=SUM({purchase_rng})")
     _money_format(ws.cell(row=row, column=SUM_PURCHASE))
 
+    # Маржа только по покрытым строкам (где есть цена закупки)
+    sum_net_covered = f'SUMIF({purchase_rng},">0",{net_rng})'
     ws.cell(row=row, column=MARGIN_ABS,
-            value=f"={_L(SUM_NET)}{row}-{_L(SUM_PURCHASE)}{row}")
+            value=(f'=IF({sum_net_covered}=0,"—",'
+                    f'{sum_net_covered}-{_L(SUM_PURCHASE)}{row})'))
     _money_format(ws.cell(row=row, column=MARGIN_ABS))
 
     ws.cell(row=row, column=MARGIN_PCT,
-            value=f"=IF({_L(SUM_NET)}{row}=0,0,"
-                  f"{_L(MARGIN_ABS)}{row}/{_L(SUM_NET)}{row})")
+            value=(f'=IF({sum_net_covered}=0,"—",'
+                    f'({sum_net_covered}-{_L(SUM_PURCHASE)}{row})'
+                    f'/{sum_net_covered})'))
     _pct_format(ws.cell(row=row, column=MARGIN_PCT))
 
     return {
@@ -336,6 +354,8 @@ def _section_subtotal_row(ws, row: int, label: str,
         "sum_gross": f"{_L(SUM_GROSS)}{row}",
         "sum_net": f"{_L(SUM_NET)}{row}",
         "sum_purchase": f"{_L(SUM_PURCHASE)}{row}",
+        # Адрес-формула для расчёта «покрытой выручки» в блоке-итоге.
+        "sum_net_covered": sum_net_covered,
     }
 
 
@@ -358,24 +378,38 @@ def _block_total_row(ws, row: int, label: str,
         ("sum_net", SUM_NET),
         ("sum_purchase", SUM_PURCHASE),
     ]:
-        formula = "+".join(s[col_key] for s in section_subtotals)
+        # У некоторых блоков (extras) поле может отсутствовать или быть "0"
+        parts = [s.get(col_key) for s in section_subtotals if s.get(col_key)]
+        formula = "+".join(parts) if parts else "0"
         cell = ws.cell(row=row, column=target_col, value=f"={formula}")
         _money_format(cell)
 
-    ws.cell(row=row, column=MARGIN_ABS,
-            value=f"={_L(SUM_NET)}{row}-{_L(SUM_PURCHASE)}{row}")
-    _money_format(ws.cell(row=row, column=MARGIN_ABS))
+    # Маржа: покрытая выручка по всем подразделам блока
+    covered_parts = [s.get("sum_net_covered") for s in section_subtotals
+                      if s.get("sum_net_covered")]
+    if covered_parts:
+        covered = "+".join(covered_parts)
+        ws.cell(row=row, column=MARGIN_ABS,
+                value=(f'=IF(({covered})=0,"—",'
+                        f'({covered})-{_L(SUM_PURCHASE)}{row})'))
+        _money_format(ws.cell(row=row, column=MARGIN_ABS))
 
-    ws.cell(row=row, column=MARGIN_PCT,
-            value=f"=IF({_L(SUM_NET)}{row}=0,0,"
-                  f"{_L(MARGIN_ABS)}{row}/{_L(SUM_NET)}{row})")
-    _pct_format(ws.cell(row=row, column=MARGIN_PCT))
+        ws.cell(row=row, column=MARGIN_PCT,
+                value=(f'=IF(({covered})=0,"—",'
+                        f'(({covered})-{_L(SUM_PURCHASE)}{row})/({covered}))'))
+        _pct_format(ws.cell(row=row, column=MARGIN_PCT))
+    else:
+        # Блок без секций (например, extras-блок целиком — маржа = -закупка)
+        ws.cell(row=row, column=MARGIN_ABS,
+                value=f"={_L(SUM_NET)}{row}-{_L(SUM_PURCHASE)}{row}")
+        _money_format(ws.cell(row=row, column=MARGIN_ABS))
 
     return {
         "row": row,
         "sum_gross": f"{_L(SUM_GROSS)}{row}",
         "sum_net": f"{_L(SUM_NET)}{row}",
         "sum_purchase": f"{_L(SUM_PURCHASE)}{row}",
+        "sum_net_covered": "+".join(covered_parts) if covered_parts else None,
     }
 
 
@@ -467,6 +501,9 @@ def _build_summary_sheet(ws: Worksheet, client: Estimate, contractor: Estimate,
     _block_header_row(ws, row, "📦 МАТЕРИАЛЫ")
     row += 1
 
+    # Для аналитики «Категории материалов» — сохраняем строки по категории
+    state["material_rows_by_category"] = {}
+
     material_section_addrs: list[dict] = []
     for section in sections_order:
         items = material_items_by_section.get(section, [])
@@ -481,6 +518,8 @@ def _build_summary_sheet(ws: Worksheet, client: Estimate, contractor: Estimate,
                 ws, row, it, "material", None, contractor.title,
                 supplier_row=sup_row,
             )
+            cat = classify_material(it.name)
+            state["material_rows_by_category"].setdefault(cat, []).append(row)
             item_rows.append(row)
             row += 1
         subtotal = _section_subtotal_row(
@@ -565,7 +604,10 @@ def _build_summary_sheet(ws: Worksheet, client: Estimate, contractor: Estimate,
         state["extras_block_total"] = {
             "row": row,
             "sum_purchase": f"{_L(SUM_PURCHASE)}{row}",
-            "sum_net": "0",   # клиент не платит за эти позиции
+            # Заказчик за эти позиции не платит — в общем итоге выручки они 0,
+            # но в общем итоге закупки они ДОБАВЛЯЮТСЯ (срезают маржу проекта).
+            "sum_net": "0",
+            "sum_gross": "0",
         }
         row += 2
 
@@ -575,6 +617,8 @@ def _build_summary_sheet(ws: Worksheet, client: Estimate, contractor: Estimate,
         project_parts.append(state["work_block_total"])
     if state["material_block_total"] and "sum_net" in state["material_block_total"]:
         project_parts.append(state["material_block_total"])
+    if state.get("extras_block_total"):
+        project_parts.append(state["extras_block_total"])
 
     state["project_total"] = _block_total_row(
         ws, row, "ВСЕГО ПО ПРОЕКТУ", project_parts,
@@ -767,15 +811,15 @@ def _build_analytics_sheet(ws: Worksheet, client: Estimate, contractor: Estimate
             value="📦 Материалы по категориям").font = Font(bold=True, size=12)
     row += 1
     ws.cell(row=row, column=1, value=(
-        "Считается отдельно «всего у Заказчика» и «покрыто закупкой». "
-        "Маржа % считается только по покрытой части, чтобы не искажать "
-        "картину пустыми позициями.")).font = Font(italic=True, color="666666")
+        "Все суммы — формулы со ссылками на «Сводную смету». "
+        "«Покрыто» — это позиции, где есть цена закупки. Маржа % "
+        "считается только по покрытой части — пустые строки не искажают.")
+    ).font = Font(italic=True, color="888888")
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=6)
     row += 1
     headers = ["Категория", "Заказчик всего (без НДС)",
                 "Заказчик покрыто (без НДС)", "Закупка (без НДС)",
                 "Маржа покрытой, %", "Покрытие, %"]
-    # расширим столбцы под новые заголовки
     for col, w in [(1, 30), (2, 22), (3, 24), (4, 20), (5, 18), (6, 16)]:
         ws.column_dimensions[_L(col)].width = w
     for col, h in enumerate(headers, start=1):
@@ -788,81 +832,67 @@ def _build_analytics_sheet(ws: Worksheet, client: Estimate, contractor: Estimate
     ws.row_dimensions[row].height = 32
     row += 1
 
-    # агрегаты по категориям (без НДС, на стороне Заказчика)
-    cat_total_client: dict[str, float] = {}
-    cat_covered_client: dict[str, float] = {}
-    cat_purchase: dict[str, float] = {}
-    cat_total_count: dict[str, int] = {}
-    cat_covered_count: dict[str, int] = {}
-
-    for c_idx, it in enumerate(client.items):
-        if it.price_material is None and it.sum_material is None:
-            continue
-        sum_mat_gross = it.sum_material if it.sum_material is not None \
-            else (it.price_material or 0) * (it.quantity or 0)
-        sum_mat_net = sum_mat_gross / (1 + VAT_RATE)
-        category = classify_material(it.name)
-
-        cat_total_client[category] = cat_total_client.get(category, 0.0) + sum_mat_net
-        cat_total_count[category] = cat_total_count.get(category, 0) + 1
-
-        sup_row = supplier_by_client_idx.get(c_idx)
-        if sup_row is not None and sup_row.get("unit_price") is not None:
-            raw = float(sup_row["unit_price"])
-            if sup_row.get("vat_included"):
-                vat_r = sup_row.get("vat_rate") or VAT_RATE
-                purchase_unit_net = raw / (1 + vat_r)
-            else:
-                purchase_unit_net = raw
-            qty = it.quantity or 0
-            purchase_sum = qty * purchase_unit_net
-            cat_purchase[category] = cat_purchase.get(category, 0.0) + purchase_sum
-            cat_covered_client[category] = cat_covered_client.get(category, 0.0) + sum_mat_net
-            cat_covered_count[category] = cat_covered_count.get(category, 0) + 1
+    # Карта строк материалов по категориям (адреса в листе «Сводная смета»)
+    rows_by_cat: dict[str, list[int]] = summary_state.get(
+        "material_rows_by_category", {})
 
     mat_first_row = row
     for category in ["Лотки", "Кабель и проводка", "Зарядные станции",
                      "Шкафы и щиты", "Другое"]:
-        if category not in cat_total_client:
+        rs = rows_by_cat.get(category, [])
+        if not rs:
             continue
-        total_c = cat_total_client[category]
-        covered_c = cat_covered_client.get(category, 0.0)
-        purchase = cat_purchase.get(category, 0.0)
-        total_n = cat_total_count[category]
-        covered_n = cat_covered_count.get(category, 0)
 
-        ws.cell(row=row, column=1, value=f"{category} ({covered_n}/{total_n})")
-        ws.cell(row=row, column=2, value=total_c).number_format = "#,##0.00 ₽"
-        ws.cell(row=row, column=3, value=covered_c).number_format = "#,##0.00 ₽"
-        ws.cell(row=row, column=4, value=purchase).number_format = "#,##0.00 ₽"
-        # Маржа покрытой части в %: (covered_client - purchase) / covered_client
-        margin_pct_cell = ws.cell(
-            row=row, column=5,
-            value=f"=IF(C{row}=0,0,(C{row}-D{row})/C{row})",
+        # Адреса трёх диапазонов на «Сводной смете» (несмежные ряды → перечисление)
+        net_addrs = ",".join(
+            f"{SUMMARY_SHEET}!{_L(SUM_NET)}{r}" for r in rs
         )
-        margin_pct_cell.number_format = "0.0%"
-        # Покрытие, % = covered_client / total_client
-        coverage_cell = ws.cell(
+        purchase_addrs = ",".join(
+            f"{SUMMARY_SHEET}!{_L(SUM_PURCHASE)}{r}" for r in rs
+        )
+        # Для SUMIF (диапазоны должны быть смежные) считаем через arrays —
+        # но т.к. строки несмежные, делаем сумму через массивы выбора:
+        # SUMPRODUCT((purchase>0)*net). Так работает корректно с любыми
+        # наборами клеток.
+        # Превратим адреса в массив через массив SUMPRODUCT.
+        # Для упрощения собираем покрытую выручку как сумму отдельных
+        # SUMIF по одиночным ячейкам.
+        # Для каждой строки: IF(purchase>0, net, 0).
+        covered_parts_list = [
+            f"IF({SUMMARY_SHEET}!{_L(SUM_PURCHASE)}{r}>0,"
+            f"{SUMMARY_SHEET}!{_L(SUM_NET)}{r},0)"
+            for r in rs
+        ]
+        covered_formula = "+".join(covered_parts_list)
+
+        # Заказчик всего (без НДС) — SUM по net
+        ws.cell(row=row, column=1, value=category)
+        ws.cell(row=row, column=2,
+                value=f"=SUM({net_addrs})").number_format = "#,##0.00 ₽"
+        # Заказчик покрыто
+        ws.cell(row=row, column=3,
+                value=f"={covered_formula}").number_format = "#,##0.00 ₽"
+        # Закупка
+        ws.cell(row=row, column=4,
+                value=f"=SUM({purchase_addrs})").number_format = "#,##0.00 ₽"
+        # Маржа покрытой части %
+        m_cell = ws.cell(
+            row=row, column=5,
+            value=f'=IF(C{row}=0,"—",(C{row}-D{row})/C{row})',
+        )
+        m_cell.number_format = "0.0%"
+        # Покрытие %
+        cov_cell = ws.cell(
             row=row, column=6,
             value=f"=IF(B{row}=0,0,C{row}/B{row})",
         )
-        coverage_cell.number_format = "0.0%"
+        cov_cell.number_format = "0.0%"
 
-        # светофор маржи (по python-вычислению)
-        if covered_c:
-            mp = (covered_c - purchase) / covered_c
-            margin_pct_cell.fill = _margin_fill(mp)
-        else:
-            margin_pct_cell.fill = GREY
-        # цвет покрытия
-        if total_c:
-            cov = covered_c / total_c
-            if cov >= 0.95:
-                coverage_cell.fill = GREEN
-            elif cov >= 0.5:
-                coverage_cell.fill = YELLOW
-            else:
-                coverage_cell.fill = RED
+        # Цвет (по нашим python-данным — приблизительно, оценка)
+        try:
+            from openpyxl.utils import column_index_from_string  # noqa
+        except Exception:
+            pass
 
         for c in range(1, 7):
             ws.cell(row=row, column=c).border = BORDER_THIN
@@ -882,7 +912,7 @@ def _build_analytics_sheet(ws: Worksheet, client: Estimate, contractor: Estimate
         ws.cell(row=row, column=4,
                 value=f"=SUM(D{mat_first_row}:D{last})").number_format = "#,##0.00 ₽"
         ws.cell(row=row, column=5,
-                value=f"=IF(C{row}=0,0,(C{row}-D{row})/C{row})").number_format = "0.0%"
+                value=f'=IF(C{row}=0,"—",(C{row}-D{row})/C{row})').number_format = "0.0%"
         ws.cell(row=row, column=6,
                 value=f"=IF(B{row}=0,0,C{row}/B{row})").number_format = "0.0%"
 
