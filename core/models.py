@@ -50,6 +50,22 @@ class Match:
 
 
 @dataclass
+class ContractorExtra:
+    """Позиция подрядчика, для которой не нашлось 1-в-1 матча со сметой Заказчика.
+
+    Получается из обратного прохода Генриха по неприматченным строкам
+    подрядчика. Если 'kind' == 'included' — это деталь крупной позиции
+    Заказчика (тогда parent_client_idx указывает на неё). Если 'extra' —
+    это самостоятельные работы, выпадающие из сметы Заказчика.
+    """
+    contractor_idx: int                          # индекс в Contractor.items
+    kind: str                                     # 'included' | 'extra'
+    parent_client_idx: Optional[int]              # для 'included' — индекс родителя в Client.items
+    confidence: float
+    reason: str
+
+
+@dataclass
 class MaterialMatch:
     """AI-сопоставление материала клиента с позицией счёта поставщика.
 

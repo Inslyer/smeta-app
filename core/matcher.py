@@ -20,7 +20,7 @@ from typing import Iterable
 
 from anthropic import Anthropic
 
-from .models import Estimate, EstimateItem, MaterialMatch, Match
+from .models import ContractorExtra, Estimate, EstimateItem, MaterialMatch, Match
 
 
 CACHE_DIR = Path(__file__).resolve().parent.parent / ".cache" / "matches"
@@ -484,3 +484,198 @@ def match_materials(
             f, ensure_ascii=False, indent=2,
         )
     return matches, meta
+
+
+# ============================================================================
+# Классификация неприматченных позиций подрядчика (доп. работы / компоненты)
+# ============================================================================
+
+EXTRAS_SYSTEM_PROMPT = """\
+Ты — эксперт по электромонтажным работам. У тебя есть СМЕТА ЗАКАЗЧИКА — \
+перечень укрупнённых позиций, и СВОБОДНЫЕ ПОЗИЦИИ ПОДРЯДЧИКА — те строки \
+из сметы подрядчика, для которых не нашлось прямого 1-в-1 соответствия в \
+смете Заказчика.
+
+Для КАЖДОЙ свободной позиции подрядчика реши: это (a) технологический \
+компонент / поднабор работ, входящий в одну из крупных позиций Заказчика \
+(тогда kind="included" и укажи parent_client_idx), или (b) самостоятельная \
+доп. работа, не покрытая сметой Заказчика (kind="extra", parent_client_idx=null).
+
+ПРИЗНАКИ "included" (входит в крупную позицию Заказчика):
+- "Затяжка кабеля в гофру" — компонент строки "Прокладка кабеля …".
+- "Установка кабельных бирок" — компонент "Прокладка кабеля".
+- "Сверление отверстий под лоток" — компонент "Монтаж лотка".
+- "Заземление металлоконструкций лотка" — компонент "Монтаж лотка".
+- "Расключение кабеля в шкафу" — компонент "Монтаж шкафа" / "Подключение шкафа".
+- "Транспортировка / разгрузка" — компонент крупной поставки или монтажа.
+
+ПРИЗНАКИ "extra" (вне сметы Заказчика):
+- Самостоятельные виды работ, на которые Заказчик не выделял позицию \
+(например, "Демонтаж старого оборудования", "Пусконаладка отдельной системы", \
+"Геодезические работы").
+- Работы с другим объектом / разделом, не указанным в смете Заказчика.
+- Накладные расходы подрядчика, оформленные отдельной строкой.
+
+confidence: 0.95-1.00 — однозначно; 0.70-0.94 — вероятно; 0.40-0.69 — спорно \
+(пометь в reason); ниже — лучше extra с низкой уверенностью.
+
+reason: 1-2 предложения на русском, почему ты так решил.
+
+Возвращай ответ ТОЛЬКО через инструмент `classify_extras`.
+"""
+
+
+EXTRAS_TOOL = {
+    "name": "classify_extras",
+    "description": (
+        "Для каждой неприматченной позиции подрядчика — классифицировать как "
+        "'included' (компонент крупной позиции Заказчика) или 'extra' (вне сметы)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "extras": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "contractor_idx": {
+                            "type": "integer",
+                            "description": "Индекс позиции подрядчика.",
+                        },
+                        "kind": {
+                            "type": "string",
+                            "enum": ["included", "extra"],
+                        },
+                        "parent_client_idx": {
+                            "type": ["integer", "null"],
+                            "description": (
+                                "Для 'included' — индекс родительской позиции "
+                                "Заказчика; для 'extra' — null."
+                            ),
+                        },
+                        "confidence": {
+                            "type": "number", "minimum": 0, "maximum": 1,
+                        },
+                        "reason": {"type": "string"},
+                    },
+                    "required": [
+                        "contractor_idx", "kind",
+                        "parent_client_idx", "confidence", "reason",
+                    ],
+                },
+            },
+        },
+        "required": ["extras"],
+    },
+}
+
+
+def _client_all_with_idx(client: Estimate) -> list[tuple[int, EstimateItem]]:
+    """Все позиции Заказчика с их индексами — для контекста."""
+    return list(enumerate(client.items))
+
+
+def _extras_cache_key(client: Estimate, contractor: Estimate,
+                       unmatched_idxs: list[int], model: str) -> str:
+    hasher = hashlib.sha256()
+    hasher.update(model.encode())
+    hasher.update(b"extras::")
+    for it in client.items:
+        hasher.update(
+            f"{it.section}|{it.name}|{it.unit}|{it.quantity}".encode()
+        )
+    hasher.update(b"::contractor::")
+    for i in unmatched_idxs:
+        it = contractor.items[i]
+        hasher.update(
+            f"{i}|{it.section}|{it.name}|{it.unit}|{it.quantity}".encode()
+        )
+    return hasher.hexdigest()[:16]
+
+
+def classify_contractor_extras(
+    client: Estimate,
+    contractor: Estimate,
+    matches: list[Match],
+    *,
+    model: str | None = None,
+    use_cache: bool = True,
+) -> tuple[list[ContractorExtra], dict]:
+    """Для каждой позиции подрядчика, которая НЕ выбрана ни одним матчем,
+    решает: 'included' (компонент крупной позиции Заказчика) или 'extra'."""
+    model = model or os.getenv("CLAUDE_MODEL") or DEFAULT_MODEL
+
+    used_contractor_idxs = {m.contractor_idx for m in matches
+                             if m.contractor_idx is not None}
+    unmatched_idxs = [
+        i for i in range(len(contractor.items))
+        if i not in used_contractor_idxs
+    ]
+    if not unmatched_idxs:
+        return [], {"from_cache": False, "skipped": "all_matched"}
+
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_path = CACHE_DIR / (
+        f"extras_{_extras_cache_key(client, contractor, unmatched_idxs, model)}.json"
+    )
+    if use_cache and cache_path.exists():
+        with cache_path.open(encoding="utf-8") as f:
+            payload = json.load(f)
+        return (
+            [ContractorExtra(**x) for x in payload["extras"]],
+            {"from_cache": True, **payload.get("meta", {})},
+        )
+
+    client_pairs = _client_all_with_idx(client)
+
+    user_prompt = (
+        "СМЕТА ЗАКАЗЧИКА — все позиции:\n"
+        f"{_format_items(client_pairs)}\n\n"
+        "СВОБОДНЫЕ ПОЗИЦИИ ПОДРЯДЧИКА (без 1-в-1 матча):\n"
+        f"{_format_items([(i, contractor.items[i]) for i in unmatched_idxs])}\n\n"
+        "Для каждой свободной позиции подрядчика верни kind='included' "
+        "(с parent_client_idx из колонки []) или 'extra' (с parent_client_idx=null). "
+        "Используй индексы ровно как указано в квадратных скобках."
+    )
+
+    client_api = Anthropic()
+    response = client_api.messages.create(
+        model=model,
+        max_tokens=8000,
+        system=EXTRAS_SYSTEM_PROMPT,
+        tools=[EXTRAS_TOOL],
+        tool_choice={"type": "tool", "name": "classify_extras"},
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+
+    tool_use = next((b for b in response.content if b.type == "tool_use"), None)
+    if tool_use is None:
+        raise RuntimeError(
+            f"Модель не вызвала classify_extras. Ответ: {response.content!r}"
+        )
+
+    raw = tool_use.input.get("extras", [])
+    extras = [
+        ContractorExtra(
+            contractor_idx=x["contractor_idx"],
+            kind=x["kind"],
+            parent_client_idx=x.get("parent_client_idx"),
+            confidence=float(x["confidence"]),
+            reason=x["reason"],
+        )
+        for x in raw
+    ]
+
+    meta = {
+        "from_cache": False,
+        "input_tokens": response.usage.input_tokens,
+        "output_tokens": response.usage.output_tokens,
+        "model": model,
+    }
+    with cache_path.open("w", encoding="utf-8") as f:
+        json.dump(
+            {"extras": [e.__dict__ for e in extras], "meta": meta},
+            f, ensure_ascii=False, indent=2,
+        )
+    return extras, meta

@@ -18,8 +18,18 @@ from core import db
 from core.parser_client import parse_client_estimate
 from core.parser_contractor import parse_contractor_estimate
 from core.exporter import build_workbook, filename_for
-from core.matcher import match_estimates, match_materials
-from core.models import Estimate, MaterialMatch, Match, SupplierInvoice
+from core.matcher import (
+    classify_contractor_extras,
+    match_estimates,
+    match_materials,
+)
+from core.models import (
+    ContractorExtra,
+    Estimate,
+    MaterialMatch,
+    Match,
+    SupplierInvoice,
+)
 from core.parser_supplier_invoice import parse_invoice
 
 # Явный путь к .env — иначе Streamlit его не находит при запуске не из cwd проекта
@@ -426,6 +436,109 @@ with tab_summary:
             )
 
             # ============================================================
+            # Доп. позиции подрядчика — что осталось без 1-в-1 матча
+            # ============================================================
+            used_contractor_idxs = {m.contractor_idx for m in matches
+                                      if m.contractor_idx is not None}
+            unmatched_contractor = [
+                i for i in range(len(contractor.items))
+                if i not in used_contractor_idxs
+            ]
+
+            if unmatched_contractor:
+                st.divider()
+                st.subheader(
+                    f"🔍 Остаток подрядчика — {len(unmatched_contractor)} поз. "
+                    "без прямого матча"
+                )
+                st.caption(
+                    "Это позиции подрядчика, которым не нашлось пары в смете "
+                    "Заказчика. Генрих разберёт: какие из них — компоненты "
+                    "крупных работ Заказчика, а какие — самостоятельные доп. "
+                    "работы вне сметы."
+                )
+
+                col_e1, col_e2 = st.columns([1, 3])
+                with col_e1:
+                    if st.button("🧪 Классифицировать остаток",
+                                  type="primary", key="run_extras"):
+                        with st.spinner("Генрих разбирает остаток..."):
+                            try:
+                                extras_res, extras_meta = classify_contractor_extras(
+                                    client, contractor, matches,
+                                )
+                                st.session_state["contractor_extras"] = extras_res
+                                st.session_state["extras_meta"] = extras_meta
+                            except Exception as e:
+                                st.error(f"Ошибка: {e}")
+                    if st.button("🗑 Сбросить", key="clear_extras"):
+                        st.session_state.pop("contractor_extras", None)
+                        st.session_state.pop("extras_meta", None)
+                with col_e2:
+                    em = st.session_state.get("extras_meta")
+                    if em:
+                        if em.get("from_cache"):
+                            st.caption("📦 Из кэша")
+                        else:
+                            st.caption(
+                                f"🧠 `{em.get('model','?')}` · "
+                                f"токены in={em.get('input_tokens')}, "
+                                f"out={em.get('output_tokens')}"
+                            )
+
+                extras: list[ContractorExtra] | None = \
+                    st.session_state.get("contractor_extras")
+                if extras:
+                    rows = []
+                    for e in extras:
+                        c_p_item = contractor.items[e.contractor_idx]
+                        parent_name = (
+                            client.items[e.parent_client_idx].name
+                            if e.parent_client_idx is not None
+                            and 0 <= e.parent_client_idx < len(client.items)
+                            else "—"
+                        )
+                        if e.kind == "included":
+                            kind_badge = "🧩 компонент"
+                        else:
+                            kind_badge = "🟪 вне сметы"
+                        rows.append({
+                            "Тип": kind_badge,
+                            "Уверен.": f"{e.confidence:.0%}",
+                            "Позиция подрядчика": c_p_item.name,
+                            "Кол-во": f"{c_p_item.quantity} {c_p_item.unit}",
+                            "Цена": c_p_item.price_work,
+                            "Сумма": (c_p_item.price_work or 0)
+                                       * (c_p_item.quantity or 0),
+                            "Входит в позицию Заказчика": parent_name,
+                            "Обоснование": e.reason,
+                        })
+                    st.dataframe(
+                        pd.DataFrame(rows),
+                        width="stretch",
+                        hide_index=True,
+                    )
+
+                    inc = sum(1 for e in extras if e.kind == "included")
+                    ext = sum(1 for e in extras if e.kind == "extra")
+                    inc_sum = sum(
+                        (contractor.items[e.contractor_idx].price_work or 0)
+                        * (contractor.items[e.contractor_idx].quantity or 0)
+                        for e in extras if e.kind == "included"
+                    )
+                    ext_sum = sum(
+                        (contractor.items[e.contractor_idx].price_work or 0)
+                        * (contractor.items[e.contractor_idx].quantity or 0)
+                        for e in extras if e.kind == "extra"
+                    )
+                    st.caption(
+                        f"🧩 компонентов крупных работ: **{inc}** "
+                        f"({inc_sum:,.0f} ₽)  ·  ".replace(",", " ")
+                        + f"🟪 вне сметы Заказчика: **{ext}** "
+                        f"({ext_sum:,.0f} ₽)".replace(",", " ")
+                    )
+
+            # ============================================================
             # Сопоставление МАТЕРИАЛОВ клиента со счетами поставщиков
             # ============================================================
             st.divider()
@@ -579,6 +692,7 @@ with tab_summary:
                     client_xlsx_bytes=st.session_state.get("client_xlsx_bytes"),
                     contractor_xlsx_bytes=st.session_state.get("contractor_xlsx_bytes"),
                     invoices_with_items=invoices_with_items or None,
+                    contractor_extras=st.session_state.get("contractor_extras"),
                 )
                 st.download_button(
                     label="💾 Скачать Excel со сводной сметой",

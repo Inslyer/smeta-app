@@ -24,7 +24,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
-from .models import Estimate, EstimateItem, MaterialMatch, Match
+from .models import ContractorExtra, Estimate, EstimateItem, MaterialMatch, Match
 
 
 VAT_RATE = 0.22
@@ -382,7 +382,8 @@ def _block_total_row(ws, row: int, label: str,
 def _build_summary_sheet(ws: Worksheet, client: Estimate, contractor: Estimate,
                           matches: list[Match],
                           material_matches: Optional[list[MaterialMatch]] = None,
-                          supplier_rows: Optional[list[dict]] = None):
+                          supplier_rows: Optional[list[dict]] = None,
+                          contractor_extras: Optional[list[ContractorExtra]] = None):
     ws.title = "Сводная смета"
     _write_headers(ws)
 
@@ -495,6 +496,78 @@ def _build_summary_sheet(ws: Worksheet, client: Estimate, contractor: Estimate,
         fill=PROJECT_TOTAL_FILL, font=WHITE_BOLD,
     )
     row += 2
+
+    # ============================== БЛОК ДОП. РАБОТ ПОДРЯДЧИКА
+    extras_extra = [
+        e for e in (contractor_extras or [])
+        if e.kind == "extra" and 0 <= e.contractor_idx < len(contractor.items)
+    ]
+    state["extras_block_total"] = None
+    if extras_extra:
+        _block_header_row(ws, row, "⚠️ ДОП. РАБОТЫ ПОДРЯДЧИКА — ВНЕ СМЕТЫ ЗАКАЗЧИКА")
+        row += 1
+
+        for e in extras_extra:
+            c_p = contractor.items[e.contractor_idx]
+            # Имитируем строку: имя позиции подрядчика, кол-во, цена закупки
+            ws.cell(row=row, column=NUMBER, value="extra")
+            ws.cell(row=row, column=NAME_CLIENT,
+                    value="(не выделено Заказчиком)").alignment = \
+                Alignment(wrap_text=True, vertical="top", italic=True) \
+                if False else Alignment(wrap_text=True, vertical="top")
+            ws.cell(row=row, column=NAME_CLIENT).font = \
+                Font(italic=True, color="888888")
+            ws.cell(row=row, column=UNIT, value=c_p.unit)
+            ws.cell(row=row, column=QTY,
+                    value=c_p.quantity or 0).number_format = "#,##0.00"
+
+            # Цена/сумма закупки
+            if c_p.price_work is not None:
+                ws.cell(row=row, column=UNIT_PRICE_PURCHASE,
+                        value=c_p.price_work)
+                _money_format(ws.cell(row=row, column=UNIT_PRICE_PURCHASE))
+                ws.cell(row=row, column=SUM_PURCHASE,
+                        value=f"={_L(QTY)}{row}*{_L(UNIT_PRICE_PURCHASE)}{row}")
+                _money_format(ws.cell(row=row, column=SUM_PURCHASE))
+
+            ws.cell(row=row, column=NAME_BOTTOM, value=c_p.name).alignment = \
+                Alignment(wrap_text=True, vertical="top")
+            ws.cell(row=row, column=EXECUTOR,
+                    value=f"{contractor.title} (extra)")
+            # Маржа: client_net = 0, sum_purchase = X → маржа = -X
+            ws.cell(row=row, column=MARGIN_ABS,
+                    value=f"=0-{_L(SUM_PURCHASE)}{row}")
+            _money_format(ws.cell(row=row, column=MARGIN_ABS))
+            ws.cell(row=row, column=MARGIN_PCT).value = None
+            ws.cell(row=row, column=MARGIN_PCT).fill = RED
+            _border_row(ws, row, N)
+            row += 1
+
+        # Итоговая строка по доп. работам
+        first_extra_row = row - len(extras_extra)
+        last_extra_row = row - 1
+        for c in range(1, N + 1):
+            ws.cell(row=row, column=c).fill = PROJECT_TOTAL_FILL
+            ws.cell(row=row, column=c).font = WHITE_BOLD
+            ws.cell(row=row, column=c).border = BORDER_THIN
+        ws.cell(row=row, column=1,
+                value="ИТОГО ДОП. РАБОТ ПОДРЯДЧИКА (вне сметы Заказчика)")
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=QTY)
+        purchase_addr = (
+            f"=SUM({_L(SUM_PURCHASE)}{first_extra_row}:"
+            f"{_L(SUM_PURCHASE)}{last_extra_row})"
+        )
+        ws.cell(row=row, column=SUM_PURCHASE, value=purchase_addr)
+        _money_format(ws.cell(row=row, column=SUM_PURCHASE))
+        ws.cell(row=row, column=MARGIN_ABS,
+                value=f"=0-{_L(SUM_PURCHASE)}{row}")
+        _money_format(ws.cell(row=row, column=MARGIN_ABS))
+        state["extras_block_total"] = {
+            "row": row,
+            "sum_purchase": f"{_L(SUM_PURCHASE)}{row}",
+            "sum_net": "0",   # клиент не платит за эти позиции
+        }
+        row += 2
 
     # ============================== ВСЕГО ПО ПРОЕКТУ
     project_parts = []
@@ -1041,7 +1114,9 @@ def build_workbook(client: Estimate, contractor: Estimate,
                     client_xlsx_bytes: Optional[bytes] = None,
                     contractor_xlsx_bytes: Optional[bytes] = None,
                     invoices_with_items: Optional[list[tuple[dict, list[dict]]]]
-                        = None) -> io.BytesIO:
+                        = None,
+                    contractor_extras: Optional[list[ContractorExtra]] = None,
+                    ) -> io.BytesIO:
     """Собирает итоговый Excel.
 
     Параметры:
@@ -1059,6 +1134,7 @@ def build_workbook(client: Estimate, contractor: Estimate,
         wb.active, client, contractor, matches,
         material_matches=material_matches,
         supplier_rows=supplier_rows,
+        contractor_extras=contractor_extras,
     )
     _build_analytics_sheet(
         wb.create_sheet(), client, contractor, matches, summary_state,
