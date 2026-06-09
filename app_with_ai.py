@@ -302,6 +302,37 @@ with st.sidebar:
     st.caption(f"Модель: `{os.getenv('CLAUDE_MODEL', 'claude-sonnet-4-6')}`")
     st.caption(f"База цен: `{db.db_label()}`")
 
+    # --- Версия билда (чтобы видеть, подхватился ли свежий деплой) ---
+    def _build_version() -> str:
+        import subprocess
+        try:
+            sha = subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=str(Path(__file__).resolve().parent),
+                stderr=subprocess.DEVNULL,
+            ).decode().strip()
+            if sha:
+                return sha
+        except Exception:
+            pass
+        try:
+            import datetime as _dt
+            mt = Path(__file__).stat().st_mtime
+            return _dt.datetime.fromtimestamp(mt).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return "?"
+    st.caption(f"Версия: `{_build_version()}`")
+
+    if st.button("🧹 Сбросить кеш сессии",
+                  help="Удаляет все сопоставления и распарсенные счета из памяти "
+                       "вкладки. Полезно, если изменения в коде не подхватились."):
+        keys_to_keep = {"_secrets_loaded", "_secrets_error"}
+        for k in list(st.session_state.keys()):
+            if k not in keys_to_keep:
+                del st.session_state[k]
+        st.success("Кеш сессии очищен. Загрузите файлы заново.")
+        st.rerun()
+
     with st.expander("🩺 Диагностика окружения"):
         st.write({
             "ANTHROPIC_API_KEY": "✓ задан" if os.getenv("ANTHROPIC_API_KEY") else "✗ нет",
