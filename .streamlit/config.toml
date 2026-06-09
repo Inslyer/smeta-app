@@ -1,0 +1,13 @@
+[theme]
+# Фирменная палитра ГРАФТИО — извлечена из логотипа и презентации 2026
+primaryColor = "#7BBE2F"              # насыщенный зелёный (кнопки, акценты)
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F4F8EE"  # off-white с лёгким лаймовым оттенком (sidebar, expander)
+textColor = "#2D2D2D"                 # угольный (как в логотипе)
+font = "sans serif"
+
+[server]
+maxUploadSize = 50
+
+[client]
+showErrorDetails = true

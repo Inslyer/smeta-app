@@ -48,13 +48,124 @@ except Exception as _e:
 
 db.init_db()
 
+ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+LOGO_MARK = ASSETS_DIR / "graftio_mark.svg"
+
 st.set_page_config(
-    page_title="Сводная смета",
-    page_icon="📋",
+    page_title="Генрих — Сводная смета · ГРАФТИО",
+    page_icon=str(LOGO_MARK) if LOGO_MARK.exists() else "📋",
     layout="wide",
 )
 
-st.title("📋 Сводная смета — автоматизация закупки")
+# ----------- Фирменный CSS Графтио --------------------------------
+st.markdown(
+    """
+<style>
+/* Загружаем Inter — современный sans-serif, ближе по духу к презентациям ГРАФТИО */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+html, body, [class*="css"], [data-testid="stMarkdownContainer"] {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+/* Шапка: фирменная зелёная полоска под заголовком */
+[data-testid="stHeader"] { background: transparent; }
+
+div[data-testid="stMain"] > div:first-child > div:first-child > h1 {
+    border-bottom: 4px solid #B1EC52;
+    padding-bottom: 0.4em;
+    margin-bottom: 0.6em;
+    color: #2D2D2D;
+    letter-spacing: -0.5px;
+}
+
+/* Primary кнопки в насыщенный зелёный с тёмным текстом */
+.stButton > button[kind="primary"] {
+    background: linear-gradient(135deg, #7BBE2F 0%, #B1EC52 100%);
+    color: #1A1A1A;
+    border: none;
+    font-weight: 600;
+}
+.stButton > button[kind="primary"]:hover {
+    background: linear-gradient(135deg, #6FA82A 0%, #A3DC4A 100%);
+    color: #1A1A1A;
+}
+
+/* Sidebar — мягкий зелёный оттенок (через secondaryBackgroundColor)
+   и аккуратный отступ от лого */
+[data-testid="stSidebar"] {
+    border-right: 1px solid #E0E0E0;
+}
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3 {
+    color: #2D2D2D;
+}
+
+/* Tabs — фирменный подсвет активной вкладки */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 4px;
+}
+.stTabs [data-baseweb="tab"] {
+    padding: 8px 18px;
+    border-radius: 8px 8px 0 0;
+}
+.stTabs [aria-selected="true"] {
+    background: linear-gradient(180deg, #F4F8EE 0%, #FFFFFF 100%);
+    border-bottom: 3px solid #7BBE2F !important;
+}
+
+/* Metric cards — лёгкая зелёная окантовка */
+[data-testid="stMetric"] {
+    background: #F4F8EE;
+    padding: 12px 16px;
+    border-radius: 10px;
+    border-left: 3px solid #7BBE2F;
+}
+
+/* Success/info/warning — без перебивания, но с фирменным акцентом */
+[data-testid="stAlert"][role="alert"] {
+    border-radius: 8px;
+}
+
+/* Заголовок страницы — место для логотипа */
+.graftio-header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 8px;
+}
+.graftio-header .mark { width: 48px; height: 48px; flex-shrink: 0; }
+.graftio-header h1 { margin: 0 !important; border: none !important; padding: 0 !important; }
+.graftio-tagline {
+    color: #5A5A5A;
+    font-size: 0.9em;
+    margin-top: -8px;
+    margin-bottom: 24px;
+    font-weight: 500;
+}
+.graftio-tagline .accent { color: #7BBE2F; font-weight: 700; }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+# --- Заголовок с логотипом ---
+if LOGO_MARK.exists():
+    logo_svg = LOGO_MARK.read_text(encoding="utf-8")
+    st.markdown(
+        f"""
+<div class="graftio-header">
+    <div class="mark">{logo_svg}</div>
+    <h1>Сводная смета</h1>
+</div>
+<div class="graftio-tagline">
+    автоматизация закупки · <span class="accent">Генрих</span> · ГРАФТИО
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+else:
+    st.title("Сводная смета — автоматизация закупки")
 
 if not os.getenv("ANTHROPIC_API_KEY"):
     st.error(
@@ -98,6 +209,22 @@ def _items_to_df(estimate: Estimate) -> pd.DataFrame:
 
 # -------------------------------------------------------------------- Sidebar
 with st.sidebar:
+    if LOGO_MARK.exists():
+        logo_svg_sidebar = LOGO_MARK.read_text(encoding="utf-8")
+        st.markdown(
+            f"""
+<div style="display:flex; align-items:center; gap:12px; margin-bottom:8px;">
+    <div style="width:36px;height:36px;">{logo_svg_sidebar}</div>
+    <div>
+        <div style="font-weight:700; font-size:1.05em; color:#2D2D2D;">Генрих</div>
+        <div style="font-size:0.78em; color:#5A5A5A;">от ГРАФТИО</div>
+    </div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+        st.divider()
+
     st.header("⚙️ Настройки")
     st.caption(f"Модель: `{os.getenv('CLAUDE_MODEL', 'claude-sonnet-4-6')}`")
     st.caption(f"База цен: `{db.db_label()}`")
